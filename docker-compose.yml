@@ -1,0 +1,55 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: screenloop-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: screenloop
+      POSTGRES_PASSWORD: screenloop
+      POSTGRES_DB: screenloop
+    ports:
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+
+  api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: screenloop-api
+    restart: unless-stopped
+    depends_on:
+      - postgres
+    env_file:
+      - ./backend/.env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://screenloop:screenloop@postgres:5432/screenloop
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./backend/app:/app/app
+      - ./backend/alembic:/app/alembic
+      - ./backend/storage:/app/storage
+
+  worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.worker
+    container_name: screenloop-worker
+    restart: unless-stopped
+    depends_on:
+      - postgres
+    env_file:
+      - ./backend/.env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://screenloop:screenloop@postgres:5432/screenloop
+      BROWSERTRIX_HOST_CRAWL_DIR: ${PWD}/browsertrix-crawls
+      BROWSERTRIX_CRAWL_DIR: /browsertrix-crawls
+    volumes:
+      - ./backend/app:/app/app
+      - ./backend/storage:/app/storage
+      - ./browsertrix-crawls:/browsertrix-crawls
+      - /var/run/docker.sock:/var/run/docker.sock
+
+volumes:
+  pgdata:
