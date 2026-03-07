@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { onMounted, onUnmounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { toast } from 'vue-sonner'
 import { Button } from '@/components/ui/button'
@@ -42,6 +42,12 @@ const capturingIds = ref<Set<string>>(new Set())
 onMounted(async () => {
   await Promise.all([urlsStore.fetchUrls(), tagsStore.fetchTags()])
 })
+
+// Refresh URL list (thumbnails) when any capture completes
+const unsubscribe = jobsStore.onCompletion(async () => {
+  await urlsStore.fetchUrls({ search: search.value || undefined, tag: activeTag.value })
+})
+onUnmounted(() => unsubscribe())
 
 async function handleSearch() {
   await urlsStore.fetchUrls({ search: search.value || undefined, tag: activeTag.value })

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, computed } from 'vue'
+import { onMounted, onUnmounted, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import {
   Card,
@@ -11,10 +11,12 @@ import {
 import { Badge } from '@/components/ui/badge'
 import { useUrlsStore } from '@/stores/urls'
 import { useCapturesStore } from '@/stores/captures'
+import { useJobsStore } from '@/stores/jobs'
 
 const router = useRouter()
 const urlsStore = useUrlsStore()
 const capturesStore = useCapturesStore()
+const jobsStore = useJobsStore()
 
 onMounted(async () => {
   await Promise.all([
@@ -22,6 +24,15 @@ onMounted(async () => {
     capturesStore.fetchCaptures({ limit: 12 }),
   ])
 })
+
+// Refresh dashboard stats when any capture completes
+const unsubscribe = jobsStore.onCompletion(async () => {
+  await Promise.all([
+    urlsStore.fetchUrls(),
+    capturesStore.fetchCaptures({ limit: 12 }),
+  ])
+})
+onUnmounted(() => unsubscribe())
 
 const activeUrls = computed(() => urlsStore.urls.filter(u => u.is_active).length)
 const errorCaptures = computed(() => capturesStore.captures.filter(c => c.status !== 'success'))
