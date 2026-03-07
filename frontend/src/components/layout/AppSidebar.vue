@@ -21,9 +21,6 @@ function isActive(path: string): boolean {
     <!-- Logo -->
     <div class="p-4 border-b border-border">
       <RouterLink to="/" class="flex items-center gap-2">
-        <div class="w-8 h-8 rounded-lg bg-primary flex items-center justify-center">
-          <span class="text-primary-foreground font-bold text-sm">SS</span>
-        </div>
         <span class="font-semibold text-lg">Snapshift</span>
       </RouterLink>
     </div>
