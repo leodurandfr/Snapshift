@@ -1,5 +1,5 @@
 [project]
-name = "screenloop"
+name = "snapshift"
 version = "0.1.0"
 description = "Visual web monitoring tool — automated full-page captures with WACZ archives"
 requires-python = ">=3.12"
@@ -23,6 +23,9 @@ dev = [
     "httpx>=0.28",
     "ruff>=0.8",
 ]
+
+[tool.setuptools.packages.find]
+include = ["app*"]
 
 [build-system]
 requires = ["setuptools>=75"]

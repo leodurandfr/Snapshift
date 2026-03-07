@@ -11,13 +11,13 @@ class Settings(BaseSettings):
     )
 
     # Database
-    database_url: str = "postgresql+asyncpg://screenloop:screenloop@localhost:5433/screenloop"
+    database_url: str = "postgresql+asyncpg://snapshift:snapshift@localhost:5433/snapshift"
 
     # API Security
     api_token: str = "change-me-to-a-random-secret-token"
 
-    # Storage
-    storage_path: Path = Path("./storage")
+    # Storage (absolute path to avoid CWD resolution issues on macOS volumes)
+    storage_path: Path = Path(__file__).parent.parent / "storage"
 
     # Capture defaults
     capture_timeout: int = 60
@@ -25,7 +25,7 @@ class Settings(BaseSettings):
 
     # Browsertrix (WACZ archive)
     browsertrix_image: str = "webrecorder/browsertrix-crawler:latest"
-    browsertrix_time_limit: int = 120
+    browsertrix_time_limit: int = 180
     browsertrix_size_limit_mb: int = 200
     browsertrix_crawl_dir: str = "/tmp/browsertrix-crawls"
     browsertrix_host_crawl_dir: str = ""

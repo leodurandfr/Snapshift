@@ -38,7 +38,7 @@ function formatDate(date: string): string {
   <div class="p-6 space-y-6">
     <div>
       <h1 class="text-2xl font-bold">Dashboard</h1>
-      <p class="text-muted-foreground text-sm mt-1">ScreenLoop overview</p>
+      <p class="text-muted-foreground text-sm mt-1">Snapshift overview</p>
     </div>
 
     <!-- Stats cards -->

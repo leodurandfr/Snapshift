@@ -22,9 +22,9 @@ function isActive(path: string): boolean {
     <div class="p-4 border-b border-border">
       <RouterLink to="/" class="flex items-center gap-2">
         <div class="w-8 h-8 rounded-lg bg-primary flex items-center justify-center">
-          <span class="text-primary-foreground font-bold text-sm">SL</span>
+          <span class="text-primary-foreground font-bold text-sm">SS</span>
         </div>
-        <span class="font-semibold text-lg">ScreenLoop</span>
+        <span class="font-semibold text-lg">Snapshift</span>
       </RouterLink>
     </div>
 
@@ -45,7 +45,7 @@ function isActive(path: string): boolean {
 
     <!-- Footer -->
     <div class="p-4 border-t border-border">
-      <p class="text-xs text-muted-foreground">ScreenLoop v0.1.0</p>
+      <p class="text-xs text-muted-foreground">Snapshift v0.1.0</p>
     </div>
   </aside>
 </template>

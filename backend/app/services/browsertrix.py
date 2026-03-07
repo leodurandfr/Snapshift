@@ -10,6 +10,9 @@ from app.config import settings
 
 logger = logging.getLogger(__name__)
 
+# Path to custom behavior scripts (relative to backend/)
+BEHAVIORS_DIR = Path(__file__).resolve().parent.parent.parent / "behaviors"
+
 # Third-party scripts that crash during replay because their APIs are unreachable.
 # Blocking them during capture means they won't be in the WACZ at all,
 # so the site's JS won't try to init them and crash.
@@ -73,20 +76,38 @@ class BrowsertrixService:
 
         local_dir.mkdir(parents=True, exist_ok=True)
 
+        # Copy custom behavior script into the crawl dir (mounted into container at /crawls/)
+        behavior_src = BEHAVIORS_DIR / "force-load-lazy.js"
+        behavior_dst = local_dir / "force-load-lazy.js"
+        if behavior_src.exists():
+            shutil.copy2(behavior_src, behavior_dst)
+
         # Generate YAML config (needed for blockRules which has no CLI equivalent)
         config = {
             "seeds": [{"url": url, "depth": 0, "scopeType": "page"}],
             "blockRules": DEFAULT_BLOCK_RULES,
             "blockAds": True,
-            "behaviors": "autoscroll,autoplay,autofetch,siteSpecific",
+            # Realistic Chrome UA to avoid CDN anti-bot blocking (e.g. LV/Dior)
+            "userAgent": (
+                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/131.0.0.0 Safari/537.36"
+            ),
+            # Custom behavior replaces autoscroll with a more thorough version
+            # that forces lazy-loaded images to load
+            "behaviors": ["autoplay", "autofetch", "siteSpecific"],
+            "customBehaviors": ["/crawls/force-load-lazy.js"],
             "behaviorTimeout": settings.browsertrix_time_limit,
-            "postLoadDelay": 5,
-            "netIdleWait": 3,
+            "postLoadDelay": 10,
+            "pageExtraDelay": 5,
+            "netIdleWait": 10,
             "generateWACZ": True,
             "limit": 1,
             "collection": crawl_id,
             "timeLimit": settings.browsertrix_time_limit,
             "screenshot": ["fullPage"],
+            # Wait for network idle and full page load before behaviors
+            "waitUntil": ["load", "networkidle0"],
         }
 
         config_path = local_dir / "crawl-config.yaml"

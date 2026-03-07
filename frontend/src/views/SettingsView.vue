@@ -50,7 +50,7 @@ const TAG_COLORS = [
   <div class="p-6 space-y-6 max-w-2xl">
     <div>
       <h1 class="text-2xl font-bold">Settings</h1>
-      <p class="text-muted-foreground text-sm mt-1">Configure ScreenLoop</p>
+      <p class="text-muted-foreground text-sm mt-1">Configure Snapshift</p>
     </div>
 
     <!-- Tags management -->

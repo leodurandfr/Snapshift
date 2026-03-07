@@ -1,4 +1,4 @@
-# ScreenLoop
+# Snapshift
 
 Outil personnel de veille visuelle web : capture automatique de pages avec archive WACZ (browsertrix-crawler + ReplayWeb.page), detection de changements, alertes — organise par tags.
 

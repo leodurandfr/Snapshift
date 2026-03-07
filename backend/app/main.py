@@ -26,7 +26,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="ScreenLoop",
+    title="Snapshift",
     description="Visual web monitoring — automated full-page captures with page archives",
     version="0.1.0",
     lifespan=lifespan,

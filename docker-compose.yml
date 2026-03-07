@@ -1,12 +1,12 @@
 services:
   postgres:
     image: postgres:16-alpine
-    container_name: screenloop-db
+    container_name: snapshift-db
     restart: unless-stopped
     environment:
-      POSTGRES_USER: screenloop
-      POSTGRES_PASSWORD: screenloop
-      POSTGRES_DB: screenloop
+      POSTGRES_USER: snapshift
+      POSTGRES_PASSWORD: snapshift
+      POSTGRES_DB: snapshift
     ports:
       - "5433:5432"
     volumes:
@@ -16,14 +16,14 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile
-    container_name: screenloop-api
+    container_name: snapshift-api
     restart: unless-stopped
     depends_on:
       - postgres
     env_file:
       - ./backend/.env
     environment:
-      DATABASE_URL: postgresql+asyncpg://screenloop:screenloop@postgres:5432/screenloop
+      DATABASE_URL: postgresql+asyncpg://snapshift:snapshift@postgres:5432/snapshift
     ports:
       - "8000:8000"
     volumes:
@@ -35,18 +35,19 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile.worker
-    container_name: screenloop-worker
+    container_name: snapshift-worker
     restart: unless-stopped
     depends_on:
       - postgres
     env_file:
       - ./backend/.env
     environment:
-      DATABASE_URL: postgresql+asyncpg://screenloop:screenloop@postgres:5432/screenloop
+      DATABASE_URL: postgresql+asyncpg://snapshift:snapshift@postgres:5432/snapshift
       BROWSERTRIX_HOST_CRAWL_DIR: ${PWD}/browsertrix-crawls
       BROWSERTRIX_CRAWL_DIR: /browsertrix-crawls
     volumes:
       - ./backend/app:/app/app
+      - ./backend/behaviors:/app/behaviors
       - ./backend/storage:/app/storage
       - ./browsertrix-crawls:/browsertrix-crawls
       - /var/run/docker.sock:/var/run/docker.sock
