@@ -9,6 +9,7 @@ from app.config import settings
 from app.database import async_session
 from app.models import CaptureJob, JobStatus, MonitoredURL
 from app.services.capture_orchestrator import CaptureOrchestrator
+from app.services.notifier import notify_job_update
 from app.services.storage import LocalStorage
 
 logger = logging.getLogger(__name__)
@@ -91,6 +92,7 @@ class Worker:
         job.status = JobStatus.RUNNING
         from datetime import datetime
         job.started_at = datetime.utcnow()
+        await notify_job_update(db, job)
         await db.commit()
         await db.refresh(job)
         return job
@@ -99,6 +101,7 @@ class Worker:
         from datetime import datetime
         job.status = JobStatus.COMPLETED
         job.completed_at = datetime.utcnow()
+        await notify_job_update(db, job)
         await db.commit()
 
     async def _fail_job(self, db: AsyncSession, job: CaptureJob, error: str):
@@ -106,4 +109,5 @@ class Worker:
         job.status = JobStatus.FAILED
         job.completed_at = datetime.utcnow()
         job.error_message = error
+        await notify_job_update(db, job)
         await db.commit()

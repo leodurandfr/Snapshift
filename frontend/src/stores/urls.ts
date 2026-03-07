@@ -1,7 +1,7 @@
 import { defineStore } from 'pinia'
 import { ref } from 'vue'
 import api from '@/lib/api'
-import type { CaptureJob, MonitoredURL, URLCreatePayload, URLUpdatePayload } from '@/types'
+import type { MonitoredURL, URLCreatePayload, URLUpdatePayload } from '@/types'
 
 export const useUrlsStore = defineStore('urls', () => {
   const urls = ref<MonitoredURL[]>([])
@@ -48,14 +48,8 @@ export const useUrlsStore = defineStore('urls', () => {
     await fetchUrls()
   }
 
-  async function captureNow(id: string): Promise<CaptureJob[]> {
-    const { data } = await api.post(`/urls/${id}/capture-now`)
-    return data
-  }
-
-  async function fetchJobs(urlId: string): Promise<CaptureJob[]> {
-    const { data } = await api.get(`/urls/${urlId}/jobs`)
-    return data
+  async function captureNow(id: string): Promise<void> {
+    await api.post(`/urls/${id}/capture-now`)
   }
 
   return {
@@ -69,6 +63,5 @@ export const useUrlsStore = defineStore('urls', () => {
     updateUrl,
     deleteUrl,
     captureNow,
-    fetchJobs,
   }
 })

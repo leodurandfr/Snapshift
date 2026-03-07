@@ -25,12 +25,14 @@ import { Loader2 } from 'lucide-vue-next'
 import { useUrlsStore } from '@/stores/urls'
 import { useTagsStore } from '@/stores/tags'
 import { useCapturesStore } from '@/stores/captures'
+import { useJobsStore } from '@/stores/jobs'
 import type { URLCreatePayload, URLUpdatePayload } from '@/types'
 
 const router = useRouter()
 const urlsStore = useUrlsStore()
 const tagsStore = useTagsStore()
 const capturesStore = useCapturesStore()
+const jobsStore = useJobsStore()
 
 const search = ref('')
 const activeTag = ref<string | undefined>(undefined)
@@ -64,8 +66,8 @@ async function handleCaptureNow(id: string) {
   capturingIds.value.add(id)
   capturingIds.value = new Set(capturingIds.value)
   try {
-    const jobs = await urlsStore.captureNow(id)
-    toast.success(`${jobs.length} capture job(s) queued`)
+    await urlsStore.captureNow(id)
+    toast.success('Capture job queued')
   } catch {
     toast.error('Failed to queue capture')
   } finally {
@@ -169,9 +171,14 @@ function formatSchedule(schedule: string): string {
               </Badge>
             </TableCell>
             <TableCell @click.stop>
-              <Button size="sm" variant="outline" :disabled="capturingIds.has(url.id)" @click="handleCaptureNow(url.id)">
-                <Loader2 v-if="capturingIds.has(url.id)" class="w-4 h-4 mr-1 animate-spin" />
-                {{ capturingIds.has(url.id) ? 'Queuing...' : 'Capture now' }}
+              <Button
+                size="sm"
+                variant="outline"
+                :disabled="capturingIds.has(url.id) || jobsStore.hasActiveJobs(url.id)"
+                @click="handleCaptureNow(url.id)"
+              >
+                <Loader2 v-if="capturingIds.has(url.id) || jobsStore.hasActiveJobs(url.id)" class="w-4 h-4 mr-1 animate-spin" />
+                {{ capturingIds.has(url.id) ? 'Queuing...' : jobsStore.hasActiveJobs(url.id) ? 'Capturing...' : 'Capture now' }}
               </Button>
             </TableCell>
           </TableRow>

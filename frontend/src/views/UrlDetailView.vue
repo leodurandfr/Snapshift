@@ -24,13 +24,15 @@ import UrlForm from '@/components/urls/UrlForm.vue'
 import ArchiveViewer from '@/components/captures/ArchiveViewer.vue'
 import { useUrlsStore } from '@/stores/urls'
 import { useCapturesStore } from '@/stores/captures'
+import { useJobsStore } from '@/stores/jobs'
 import api from '@/lib/api'
-import type { Capture, CaptureJob, URLUpdatePayload } from '@/types'
+import type { Capture, URLUpdatePayload } from '@/types'
 
 const route = useRoute()
 const router = useRouter()
 const urlsStore = useUrlsStore()
 const capturesStore = useCapturesStore()
+const jobsStore = useJobsStore()
 
 const urlId = computed(() => route.params.id as string)
 const showEditDialog = ref(false)
@@ -39,8 +41,8 @@ const archiveViewerCapture = ref<Capture | null>(null)
 const viewportFilter = ref<string>('all')
 
 const capturing = ref(false)
-const activeJobs = ref<CaptureJob[]>([])
-let jobPollTimer: ReturnType<typeof setInterval> | null = null
+
+const activeJobs = computed(() => jobsStore.jobsForUrl(urlId.value))
 
 const jobProgress = computed(() => {
   if (!activeJobs.value.length) return null
@@ -52,43 +54,14 @@ const jobProgress = computed(() => {
   return { total, completed, running, failed, allDone }
 })
 
-function startJobPolling(jobs: CaptureJob[]) {
-  activeJobs.value = jobs
-  stopJobPolling()
-  jobPollTimer = setInterval(async () => {
-    try {
-      const allJobs = await urlsStore.fetchJobs(urlId.value)
-      // Match only the jobs we're tracking
-      const jobIds = new Set(activeJobs.value.map(j => j.id))
-      activeJobs.value = allJobs.filter(j => jobIds.has(j.id))
-
-      const progress = jobProgress.value
-      if (progress?.allDone) {
-        stopJobPolling()
-        // Refresh captures list
-        await capturesStore.fetchCaptures({ url_id: urlId.value })
-        if (progress.failed > 0) {
-          toast.warning(`Capture done: ${progress.completed - progress.failed} OK, ${progress.failed} failed`)
-        } else {
-          toast.success('All captures completed')
-        }
-        // Clear after a short delay so the user sees the final state
-        setTimeout(() => { activeJobs.value = [] }, 3000)
-      }
-    } catch {
-      // Silently ignore poll errors
-    }
-  }, 3000)
-}
-
-function stopJobPolling() {
-  if (jobPollTimer) {
-    clearInterval(jobPollTimer)
-    jobPollTimer = null
+// Refresh captures when a job for this URL completes
+const unsubscribe = jobsStore.onCompletion(async (completedUrlId: string) => {
+  if (completedUrlId === urlId.value) {
+    await capturesStore.fetchCaptures({ url_id: urlId.value })
   }
-}
+})
 
-onUnmounted(() => stopJobPolling())
+onUnmounted(() => unsubscribe())
 
 // Selection mode
 const selectMode = ref(false)
@@ -162,9 +135,8 @@ function handleCaptureClick(capture: Capture) {
 async function handleCaptureNow() {
   capturing.value = true
   try {
-    const jobs = await urlsStore.captureNow(urlId.value)
-    toast.success(`${jobs.length} capture job(s) queued`)
-    startJobPolling(jobs)
+    await urlsStore.captureNow(urlId.value)
+    toast.success('Capture job queued')
   } catch {
     toast.error('Failed to queue capture')
   } finally {
@@ -254,9 +226,9 @@ function formatBytes(bytes: number | null): string {
         </div>
         <div class="flex gap-2">
           <Button variant="outline" @click="showEditDialog = true">Edit</Button>
-          <Button :disabled="capturing" @click="handleCaptureNow">
-            <Loader2 v-if="capturing" class="w-4 h-4 mr-1 animate-spin" />
-            {{ capturing ? 'Queuing...' : 'Capture now' }}
+          <Button :disabled="capturing || jobsStore.hasActiveJobs(urlId)" @click="handleCaptureNow">
+            <Loader2 v-if="capturing || jobsStore.hasActiveJobs(urlId)" class="w-4 h-4 mr-1 animate-spin" />
+            {{ capturing ? 'Queuing...' : jobsStore.hasActiveJobs(urlId) ? 'Capturing...' : 'Capture now' }}
           </Button>
           <Button variant="destructive" @click="handleDelete">Delete</Button>
         </div>

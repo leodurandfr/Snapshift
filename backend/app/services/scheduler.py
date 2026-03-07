@@ -7,6 +7,7 @@ from sqlalchemy import select
 
 from app.database import async_session
 from app.models import CaptureJob, JobStatus, MonitoredURL
+from app.services.notifier import notify_job_update
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +117,7 @@ class CaptureScheduler:
                 status=JobStatus.PENDING,
             )
             db.add(job)
-
+            await db.flush()
+            await notify_job_update(db, job)
             await db.commit()
             logger.info(f"Created capture job for {url.url}")

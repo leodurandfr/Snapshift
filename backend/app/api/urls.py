@@ -9,6 +9,7 @@ from app.config import settings
 from app.models import Capture, CaptureJob, JobStatus, MonitoredURL, Tag
 from app.schemas.job import JobResponse
 from app.schemas.url import URLCreate, URLListResponse, URLResponse, URLUpdate
+from app.services.notifier import notify_job_update
 from app.services.storage import LocalStorage
 
 router = APIRouter(prefix="/urls", tags=["urls"])
@@ -229,7 +230,8 @@ async def capture_now(url_id: uuid.UUID, db: DbSession, _token: AuthToken):
         status=JobStatus.PENDING,
     )
     db.add(job)
-
+    await db.flush()
+    await notify_job_update(db, job)
     await db.commit()
     await db.refresh(job)
     return [job]
