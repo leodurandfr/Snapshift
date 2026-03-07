@@ -87,12 +87,9 @@ class BrowsertrixService:
             "seeds": [{"url": url, "depth": 0, "scopeType": "page"}],
             "blockRules": DEFAULT_BLOCK_RULES,
             "blockAds": True,
-            # Realistic Chrome UA to avoid CDN anti-bot blocking (e.g. LV/Dior)
-            "userAgent": (
-                "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                "AppleWebKit/537.36 (KHTML, like Gecko) "
-                "Chrome/131.0.0.0 Safari/537.36"
-            ),
+            # Let Chrome use its real UA — hardcoding creates a mismatch
+            # between declared UA and actual TLS/browser fingerprint,
+            # which WAFs like Akamai Bot Manager detect.
             # Custom behavior replaces autoscroll with a more thorough version
             # that forces lazy-loaded images to load
             "behaviors": ["autoplay", "autofetch", "siteSpecific"],
@@ -108,6 +105,8 @@ class BrowsertrixService:
             "screenshot": ["fullPage"],
             # Wait for network idle and full page load before behaviors
             "waitUntil": ["load", "networkidle0"],
+            # Anti-bot detection: realistic browser profile
+            "lang": "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7",
         }
 
         config_path = local_dir / "crawl-config.yaml"
@@ -119,7 +118,10 @@ class BrowsertrixService:
             "-v", f"{host_dir}:/crawls/",
             settings.browsertrix_image,
             "crawl",
-            "--config", f"/crawls/crawl-config.yaml",
+            "--config", "/crawls/crawl-config.yaml",
+            # Stealth flags to reduce bot detection by WAFs (Akamai, etc.)
+            "--chromeOptions",
+            "--disable-blink-features=AutomationControlled",
         ]
 
         timeout = settings.browsertrix_time_limit + 60
