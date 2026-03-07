@@ -4,6 +4,7 @@ __pycache__/
 *$py.class
 *.so
 .venv/
+.venv_old/
 *.egg-info/
 dist/
 build/
@@ -29,6 +30,10 @@ storage/
 # OS
 .DS_Store
 Thumbs.db
+.smbdeleteAAA*
+
+# Test data
+pywb-test/
 
 # Docker
 docker-compose.override.yml
