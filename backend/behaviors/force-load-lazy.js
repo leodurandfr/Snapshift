@@ -1,10 +1,10 @@
 // Custom browsertrix-crawler behavior: force-load all lazy/deferred content
-// Replaces the default autoscroll with a more thorough version that:
-// 1. Pre-fetches ALL Next.js/Webpack dynamic chunks (fixes missing JS components)
-// 2. Scrolls slowly through the entire page (multiple passes)
+// Replaces the default autoscroll with a version that:
+// 0. Simulates human interaction (mouse moves, micro-scrolls) to pass WAF behavioral analysis
+// 1. Pre-fetches Next.js/Webpack dynamic chunks (fixes missing JS components)
+// 2. Scrolls through the entire page (single pass, top to bottom)
 // 3. Forces all loading="lazy" images to load
-// 4. Scrolls each image element into view to trigger IntersectionObserver
-// 5. Prefetches srcset/data-src URLs found in the DOM
+// 4. Prefetches srcset/data-src URLs found in the DOM
 
 class ForceLoadLazy {
   static id = "ForceLoadLazy";
@@ -25,6 +25,59 @@ class ForceLoadLazy {
     const sleep = Lib.sleep;
 
     await log("ForceLoadLazy: starting behavior");
+
+    // --- Step -1: Human interaction simulation ---
+    // WAFs like Akamai Bot Manager collect behavioral telemetry (mouse
+    // movements, scroll patterns, timing) via their sensor JS.  Dispatching
+    // realistic DOM events before any heavy automation makes the session
+    // look human.  This runs on every page, including the warm-up page,
+    // which is where the _abck cookie gets validated.
+    yield { msg: "Simulating human interaction..." };
+
+    try {
+      var vw = window.innerWidth;
+      var vh = window.innerHeight;
+
+      // Helper: dispatch a mouse event at (x, y)
+      function emitMouse(type, x, y) {
+        document.dispatchEvent(new MouseEvent(type, {
+          clientX: x, clientY: y, bubbles: true, cancelable: true
+        }));
+      }
+
+      // Simulate a natural mouse path: a few random movements across the viewport
+      var steps = 8 + Math.floor(Math.random() * 6); // 8-13 moves
+      var cx = Math.floor(vw * 0.3 + Math.random() * vw * 0.4);
+      var cy = Math.floor(vh * 0.3 + Math.random() * vh * 0.4);
+
+      for (var mi = 0; mi < steps; mi++) {
+        // Move toward a random target with some noise
+        cx += Math.floor((Math.random() - 0.5) * vw * 0.15);
+        cy += Math.floor((Math.random() - 0.5) * vh * 0.15);
+        cx = Math.max(10, Math.min(vw - 10, cx));
+        cy = Math.max(10, Math.min(vh - 10, cy));
+        emitMouse("mousemove", cx, cy);
+        await sleep(80 + Math.floor(Math.random() * 120));
+      }
+
+      // Small micro-scroll (human-like hesitation before reading)
+      window.scrollTo({ top: 50 + Math.floor(Math.random() * 100), behavior: "smooth" });
+      await sleep(300 + Math.floor(Math.random() * 400));
+      window.scrollTo({ top: 0, behavior: "smooth" });
+      await sleep(200 + Math.floor(Math.random() * 300));
+
+      // A couple of extra mouse moves after scroll
+      for (var mj = 0; mj < 3; mj++) {
+        emitMouse("mousemove",
+          Math.floor(Math.random() * vw),
+          Math.floor(Math.random() * vh));
+        await sleep(100 + Math.floor(Math.random() * 150));
+      }
+    } catch (e) {
+      await log("Human simulation error (non-fatal): " + e);
+    }
+
+    yield { msg: "Human interaction simulation done" };
 
     // --- Step 0: Pre-fetch ALL dynamic JS/CSS chunks ---
     // Next.js/Webpack apps only load chunks on demand. We fetch them all
@@ -213,7 +266,7 @@ class ForceLoadLazy {
       // ignore
     }
 
-    // --- Pass 1: Slow scroll down to trigger IntersectionObserver lazy loading ---
+    // --- Scroll down to trigger IntersectionObserver lazy loading ---
     var scrollHeight = function() {
       return Math.max(
         document.documentElement.scrollHeight,
@@ -221,16 +274,16 @@ class ForceLoadLazy {
       );
     };
     var viewportHeight = window.innerHeight;
-    var increment = Math.floor(viewportHeight * 0.25);
+    var increment = Math.floor(viewportHeight * 0.5);
 
-    yield { msg: "Starting thorough scroll pass 1..." };
+    yield { msg: "Scrolling page top to bottom..." };
 
     var pos = 0;
     var lastHeight = scrollHeight();
 
     while (pos < scrollHeight()) {
       window.scrollTo({ top: pos, behavior: "smooth" });
-      await sleep(500);
+      await sleep(300);
 
       var newHeight = scrollHeight();
       if (newHeight > lastHeight) {
@@ -245,34 +298,9 @@ class ForceLoadLazy {
     window.scrollTo({ top: scrollHeight(), behavior: "smooth" });
     await sleep(1500);
 
-    yield { msg: "Scroll pass 1 complete (" + pos + "px)" };
+    yield { msg: "Scroll complete (" + pos + "px)" };
 
-    // --- Pass 2: Scroll every image/video element into the viewport ---
-    // This triggers IntersectionObserver callbacks that lazy-load content
-    yield { msg: "Scrolling individual media elements into view..." };
-
-    var mediaElements = document.querySelectorAll(
-      "img, video, picture, [data-src], [data-lazy], [class*=lazy], [class*=Lazy]"
-    );
-    var scrolledCount = 0;
-
-    for (var i = 0; i < mediaElements.length; i++) {
-      var el = mediaElements[i];
-      try {
-        el.scrollIntoView({ behavior: "smooth", block: "center" });
-        await sleep(150);
-        scrolledCount++;
-      } catch (e) {
-        // ignore
-      }
-    }
-
-    yield { msg: "Scrolled " + scrolledCount + " media elements into view" };
-
-    // Wait for network requests triggered by IntersectionObserver
-    await sleep(3000);
-
-    // --- Pass 3: Force lazy images (loading="lazy" attribute) ---
+    // --- Force lazy images (loading="lazy" attribute) ---
     var lazyImages = document.querySelectorAll('img[loading="lazy"]');
     for (var j = 0; j < lazyImages.length; j++) {
       var img = lazyImages[j];
@@ -388,39 +416,8 @@ class ForceLoadLazy {
 
     yield { msg: "Fetched " + fetchList.length + " resource URLs" };
 
-    // --- Pass 5: Reverse scroll ---
-    yield { msg: "Starting reverse scroll..." };
-
-    pos = scrollHeight();
-    while (pos > 0) {
-      window.scrollTo({ top: pos, behavior: "smooth" });
-      await sleep(300);
-      pos -= increment;
-    }
-    window.scrollTo({ top: 0, behavior: "smooth" });
-    await sleep(1000);
-
-    // --- Pass 6: Final forward scroll ---
-    yield { msg: "Final forward scroll..." };
-
-    pos = 0;
-    while (pos < scrollHeight()) {
-      window.scrollTo({ top: pos, behavior: "smooth" });
-      await sleep(200);
-      pos += increment;
-    }
-    window.scrollTo({ top: scrollHeight(), behavior: "smooth" });
-    await sleep(2000);
-
-    // Final cleanup: force any remaining lazy images
-    var finalLazy = document.querySelectorAll('img[loading="lazy"]');
-    for (var y = 0; y < finalLazy.length; y++) {
-      finalLazy[y].removeAttribute("loading");
-      state.imagesForced++;
-    }
-
     yield {
-      msg: "Done! Scrolled " + state.scrolled + "px, forced " + state.imagesForced + " lazy images, fetched " + state.urlsFetched + " URLs, " + state.chunksFetched + " chunks, scrolled " + scrolledCount + " elements",
+      msg: "Done! Scrolled " + state.scrolled + "px, forced " + state.imagesForced + " lazy images, fetched " + state.urlsFetched + " URLs, " + state.chunksFetched + " chunks",
     };
   }
 }

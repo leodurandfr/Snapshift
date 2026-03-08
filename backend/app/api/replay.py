@@ -32,25 +32,90 @@ _REPLAY_PATCH = r"""<script>
   /* --- Global error suppression (prevents white pages from error boundaries) --- */
   window.addEventListener('error',function(e){e.stopImmediatePropagation();e.preventDefault()},true);
   window.addEventListener('unhandledrejection',function(e){e.stopImmediatePropagation();e.preventDefault()},true);
-  /* (fetch 404 interception moved to SW level — wombat.js wraps page fetch) */
-  /* (IntersectionObserver patch removed — conflicts with wombat.js wrapper) */
-  /* --- Force media elements visible --- */
-  /* Many sites hide images via CSS (opacity:0/visibility:hidden) until a JS        */
-  /* onload callback adds a "loaded" class. In replay, onload may not fire           */
-  /* correctly, leaving images invisible. We force all media visible and             */
-  /* re-dispatch load events on already-complete images.                             */
-  var ss=document.createElement('style');
-  ss.textContent='img,picture,video,source{opacity:1!important;visibility:visible!important}';
-  (document.head||document.documentElement).appendChild(ss);
-  setTimeout(function(){
+
+  /* --- Wombat Function.prototype.call/apply tolerance --- */
+  /* wombat.js wraps Function.prototype.call/apply for URL rewriting.            */
+  /* Heavily obfuscated JS (SFCC/LV) chains .call()/.apply() results as         */
+  /* property keys or function calls. When wombat alters the return value,       */
+  /* the chain breaks with "is not a function". We save the native versions      */
+  /* and re-wrap wombat's overrides with a fallback to the originals.            */
+  var _nativeApply=Function.prototype.apply;
+  var _nativeCall=Function.prototype.call;
+  var _R=typeof Reflect!=='undefined'?Reflect:null;
+  /* Poll until wombat has overridden call/apply, then wrap with fallback.
+     All internal calls use Reflect.apply which does NOT go through
+     Function.prototype, avoiding infinite recursion. */
+  var _wombatCheckCount=0;
+  var _wombatCheck=setInterval(function(){
+    _wombatCheckCount++;
+    if(_wombatCheckCount>100){clearInterval(_wombatCheck);return}
+    if(Function.prototype.apply===_nativeApply)return;
+    clearInterval(_wombatCheck);
+    var wApply=Function.prototype.apply;
+    var wCall=Function.prototype.call;
+    if(!_R)return; /* Reflect required for safe wrapping */
+    Function.prototype.apply=function(thisArg,args){
+      try{return _R.apply(wApply,this,[thisArg,args])}
+      catch(e){
+        /* Fallback: call the target function directly via Reflect,
+           bypassing both wombat and this wrapper entirely. */
+        try{return _R.apply(this,thisArg,args||[])}
+        catch(e2){return undefined}
+      }
+    };
+    Function.prototype.call=function(thisArg){
+      var a=[];for(var i=1;i<arguments.length;i++)a.push(arguments[i]);
+      try{return _R.apply(wCall,this,_R.apply(_nativeCall,Array.prototype.slice,[arguments,[0]]))}
+      catch(e){
+        /* Fallback: invoke target function directly, skip .call wrapper */
+        try{return _R.apply(this,thisArg,a)}
+        catch(e2){return undefined}
+      }
+    };
+  },10);
+
+  /* --- Force page visibility (anti-blank-page) --- */
+  /* SPAs and SFCC sites hide the page (opacity:0, visibility:hidden, etc.)     */
+  /* until JS initialization completes. When JS crashes in replay, the SSR      */
+  /* content stays invisible. We force everything visible via CSS overrides      */
+  /* and delayed inline-style cleanup.                                          */
+  var vs=document.createElement('style');
+  vs.textContent=[
+    'html,body,#app,#root,#__next,[data-app],main,.app-wrapper,.page-wrapper,',
+    '.lv-page,.lv-app,[data-component]{',
+    'opacity:1!important;visibility:visible!important;overflow:visible!important}',
+    'img,picture,video,source{opacity:1!important;visibility:visible!important}',
+    /* Kill transitions/animations that keep content hidden during "loading" */
+    '[class*="loading"],[class*="preload"],[class*="initializing"]{',
+    'opacity:1!important;visibility:visible!important;pointer-events:auto!important}'
+  ].join('');
+  (document.head||document.documentElement).appendChild(vs);
+
+  /* Delayed forced visibility: remove hiding inline styles + classes */
+  function forceVisible(){
+    /* Force inline styles on key containers */
+    var sels='body,body>*,#app,#root,#__next,main,[data-app],[role="main"],.page-wrapper';
+    document.querySelectorAll(sels).forEach(function(el){
+      var s=el.style;
+      if(s.opacity==='0')s.opacity='1';
+      if(s.visibility==='hidden')s.visibility='visible';
+      if(s.display==='none'&&el.tagName!=='SCRIPT'&&el.tagName!=='STYLE')s.display='';
+    });
+    /* Remove loading/preload classes from html and body */
+    ['loading','is-loading','not-ready','preload','no-js'].forEach(function(c){
+      document.documentElement.classList.remove(c);
+      document.body.classList.remove(c);
+    });
+    /* Re-dispatch load events on images */
     document.querySelectorAll('img').forEach(function(img){
       if(img.complete)img.dispatchEvent(new Event('load'));
     });
-  },2000);
+  }
+  setTimeout(forceVisible,1500);
+  setTimeout(forceVisible,3000);
+  setTimeout(forceVisible,6000);
+
   /* --- Fix zero-height images: uncollapse flex/hidden ancestors --- */
-  /* When site JS fails in replay, images end up at 0px inside flex containers  */
-  /* or ancestors with height:0. We detect loaded images with 0 rendered height */
-  /* and fix them + their ancestor chain. Runs on each image load + intervals.  */
   function fixImg(img){
     if(img.naturalHeight<1)return;
     if(img.getBoundingClientRect().height>=2)return;
