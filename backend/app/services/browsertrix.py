@@ -121,6 +121,7 @@ class BrowsertrixService:
             "--disable-blink-features=AutomationControlled",
             "--disable-features=IsolateOrigins,site-per-process",
             "--disable-site-isolation-trials",
+            "--hide-scrollbars",
         ])
 
         profile_path: str | None = None
@@ -148,7 +149,7 @@ class BrowsertrixService:
             "limit": 1,
             "collection": crawl_id,
             "timeLimit": settings.browsertrix_time_limit,
-            "screenshot": ["view"],
+            "screenshot": ["fullPage"],
             "waitUntil": ["load", "networkidle2"],
             "lang": "fr",
         }
