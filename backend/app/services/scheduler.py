@@ -3,7 +3,7 @@ import logging
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
 from apscheduler.triggers.interval import IntervalTrigger
-from sqlalchemy import select
+from sqlalchemy import or_, select
 
 from app.database import async_session
 from app.models import CaptureJob, JobStatus, MonitoredURL
@@ -102,10 +102,43 @@ class CaptureScheduler:
     @staticmethod
     async def _create_capture_jobs(url_id: str):
         import uuid as uuid_mod
+        from datetime import datetime, timedelta, timezone
 
         async with async_session() as db:
             url = await db.get(MonitoredURL, uuid_mod.UUID(url_id))
             if not url or not url.is_active:
+                return
+
+            # Skip if there's already a pending/running job for this URL
+            existing = await db.execute(
+                select(CaptureJob)
+                .where(
+                    CaptureJob.url_id == url.id,
+                    CaptureJob.status.in_([JobStatus.PENDING, JobStatus.RUNNING]),
+                )
+                .limit(1)
+            )
+            if existing.scalar_one_or_none():
+                logger.debug(f"Skipping job for {url.url}: active job exists")
+                return
+
+            # Skip if last job failed less than 1 hour ago (avoid retry loop)
+            cutoff = datetime.now(timezone.utc) - timedelta(hours=1)
+            last_failed = await db.execute(
+                select(CaptureJob)
+                .where(
+                    CaptureJob.url_id == url.id,
+                    CaptureJob.status == JobStatus.FAILED,
+                    or_(
+                        CaptureJob.completed_at > cutoff,
+                        CaptureJob.completed_at.is_(None),
+                    ),
+                )
+                .order_by(CaptureJob.completed_at.desc().nullslast())
+                .limit(1)
+            )
+            if last_failed.scalar_one_or_none():
+                logger.info(f"Skipping job for {url.url}: last job failed < 1h ago")
                 return
 
             # One job per URL (browsertrix captures the full page)
