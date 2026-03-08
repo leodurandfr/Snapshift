@@ -76,6 +76,7 @@ class URLResponse(BaseModel):
     created_at: datetime
     updated_at: datetime
     tags: list[TagResponse] = Field(default_factory=list)
+    last_capture_id: uuid.UUID | None = None
     last_capture_at: datetime | None = None
     last_capture_status: str | None = None
     last_thumbnail: str | None = None

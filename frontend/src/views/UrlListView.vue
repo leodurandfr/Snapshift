@@ -148,7 +148,7 @@ function formatSchedule(schedule: string): string {
               <div class="w-12 h-8 bg-muted rounded overflow-hidden">
                 <img
                   v-if="url.last_thumbnail"
-                  :src="capturesStore.thumbnailUrl(url.id)"
+                  :src="capturesStore.thumbnailUrl(url.last_capture_id!)"
                   class="w-full h-full object-cover"
                   alt=""
                 />

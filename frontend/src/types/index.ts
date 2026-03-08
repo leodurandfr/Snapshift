@@ -24,6 +24,7 @@ export interface MonitoredURL {
   created_at: string
   updated_at: string
   tags: Tag[]
+  last_capture_id: string | null
   last_capture_at: string | null
   last_capture_status: string | null
   last_thumbnail: string | null

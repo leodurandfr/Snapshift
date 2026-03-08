@@ -30,6 +30,7 @@ def _url_to_response(url: MonitoredURL, last_capture: Capture | None = None) -> 
         created_at=url.created_at,
         updated_at=url.updated_at,
         tags=url.tags,
+        last_capture_id=last_capture.id if last_capture else None,
         last_capture_at=last_capture.captured_at if last_capture else None,
         last_capture_status=last_capture.status.value if last_capture else None,
         last_thumbnail=last_capture.thumbnail_path if last_capture else None,
