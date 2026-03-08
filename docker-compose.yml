@@ -37,19 +37,23 @@ services:
       dockerfile: Dockerfile.worker
     container_name: snapshift-worker
     restart: unless-stopped
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
     depends_on:
       - postgres
     env_file:
       - ./backend/.env
     environment:
       DATABASE_URL: postgresql+asyncpg://snapshift:snapshift@postgres:5432/snapshift
-      BROWSERTRIX_HOST_CRAWL_DIR: ${PWD}/browsertrix-crawls
       BROWSERTRIX_CRAWL_DIR: /browsertrix-crawls
+      BROWSERTRIX_DOCKER_VOLUME: snapshift_crawl_data
     volumes:
       - ./backend/app:/app/app
       - ./backend/behaviors:/app/behaviors
       - ./backend/storage:/app/storage
-      - ./browsertrix-crawls:/browsertrix-crawls
+      - crawl_data:/browsertrix-crawls
       - /var/run/docker.sock:/var/run/docker.sock
 
   frontend:
@@ -71,3 +75,5 @@ services:
 volumes:
   pgdata:
   frontend_node_modules:
+  crawl_data:
+    name: snapshift_crawl_data

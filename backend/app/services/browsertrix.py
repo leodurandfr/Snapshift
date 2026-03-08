@@ -1,5 +1,6 @@
 import asyncio
 import gzip
+import io
 import json
 import logging
 import shutil
@@ -9,6 +10,7 @@ import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import NamedTemporaryFile
+from urllib.parse import urlparse
 
 from app.config import settings
 
@@ -72,21 +74,63 @@ class BrowsertrixService:
     async def capture(self, url: str, capture_id: uuid.UUID) -> BrowsertrixResult | None:
         crawl_id = f"capture-{capture_id}"
         local_dir = Path(settings.browsertrix_crawl_dir) / str(capture_id)
-        host_dir = (
-            Path(settings.browsertrix_host_crawl_dir) / str(capture_id)
-            if settings.browsertrix_host_crawl_dir
-            else local_dir
-        )
+        use_volume = bool(settings.browsertrix_docker_volume)
 
         local_dir.mkdir(parents=True, exist_ok=True)
 
-        # Copy custom behavior script into the crawl dir (mounted into container at /crawls/)
+        # Copy custom behavior script into the crawl dir
         behavior_src = BEHAVIORS_DIR / "force-load-lazy.js"
         behavior_dst = local_dir / "force-load-lazy.js"
         if behavior_src.exists():
             shutil.copy2(behavior_src, behavior_dst)
 
-        # Generate YAML config (needed for blockRules which has no CLI equivalent)
+        if use_volume:
+            # Docker named volume: mount entire volume at /crawls/,
+            # config and behavior in a capture-specific subdir.
+            crawls_subdir = str(capture_id)
+            behavior_container_path = f"/crawls/{crawls_subdir}/force-load-lazy.js"
+            config_container_path = f"/crawls/{crawls_subdir}/crawl-config.yaml"
+            volume_arg = f"{settings.browsertrix_docker_volume}:/crawls/"
+        else:
+            # Bind mount: mount capture-specific dir at /crawls/
+            host_dir = (
+                Path(settings.browsertrix_host_crawl_dir) / str(capture_id)
+                if settings.browsertrix_host_crawl_dir
+                else local_dir
+            )
+            behavior_container_path = "/crawls/force-load-lazy.js"
+            config_container_path = "/crawls/crawl-config.yaml"
+            volume_arg = f"{host_dir}:/crawls/"
+
+        # --- Warm-up phase (separate Docker run) ---
+        # Anti-bot WAFs (Akamai Bot Manager, etc.) set a validation cookie
+        # (_abck) via client-side JS on the first page visit. Protected
+        # sub-pages require this cookie. We run a quick, lightweight crawl
+        # of the domain root to let the WAF JS execute and set the cookie,
+        # then save the browser profile.  The real capture reuses that
+        # profile, getting a fresh full page load (no SPA interference).
+        parsed = urlparse(url)
+        origin = f"{parsed.scheme}://{parsed.netloc}/"
+        needs_warmup = (
+            bool(parsed.scheme) and bool(parsed.netloc)
+            and url.rstrip("/") != origin.rstrip("/")
+        )
+
+        # Stealth Chrome flags to reduce bot fingerprinting by WAFs.
+        chrome_stealth_args = " ".join([
+            "--disable-blink-features=AutomationControlled",
+            "--disable-features=IsolateOrigins,site-per-process",
+            "--disable-site-isolation-trials",
+        ])
+
+        profile_path: str | None = None
+        if needs_warmup:
+            profile_path = await self._run_warmup(
+                origin, local_dir, volume_arg, use_volume,
+                behavior_container_path, chrome_stealth_args,
+            )
+
+        # --- Main capture config ---
         config = {
             "seeds": [{"url": url, "depth": 0, "scopeType": "page"}],
             "blockRules": DEFAULT_BLOCK_RULES,
@@ -94,44 +138,44 @@ class BrowsertrixService:
             # Let Chrome use its real UA — hardcoding creates a mismatch
             # between declared UA and actual TLS/browser fingerprint,
             # which WAFs like Akamai Bot Manager detect.
-            # Custom behavior replaces autoscroll with a more thorough version
-            # that forces lazy-loaded images to load
             "behaviors": ["autoplay", "autofetch", "siteSpecific"],
-            "customBehaviors": ["/crawls/force-load-lazy.js"],
+            "customBehaviors": [behavior_container_path],
             "behaviorTimeout": settings.browsertrix_time_limit,
-            "postLoadDelay": 10,
-            "pageExtraDelay": 5,
-            "netIdleWait": 10,
+            "postLoadDelay": 5,
+            "pageExtraDelay": 0,
+            "netIdleWait": 5,
             "generateWACZ": True,
             "limit": 1,
             "collection": crawl_id,
             "timeLimit": settings.browsertrix_time_limit,
             "screenshot": ["fullPage"],
-            # Wait for network idle and full page load before behaviors
-            "waitUntil": ["load", "networkidle0"],
-            # Browser locale (ISO-639-1 code only)
+            "waitUntil": ["load", "networkidle2"],
             "lang": "fr",
         }
 
         config_path = local_dir / "crawl-config.yaml"
         config_path.write_text(yaml.dump(config, default_flow_style=False))
 
-        # The config file must be readable inside the container at /crawls/
         cmd = [
             "docker", "run", "--rm",
-            "-v", f"{host_dir}:/crawls/",
+            "--ulimit", "nofile=65536:65536",
+            "-v", volume_arg,
             settings.browsertrix_image,
             "crawl",
-            "--config", "/crawls/crawl-config.yaml",
-            # Stealth flags to reduce bot detection by WAFs (Akamai, etc.)
-            "--extraChromeArgs",
-            "--disable-blink-features=AutomationControlled",
+            "--config", config_container_path,
+            "--extraChromeArgs", chrome_stealth_args,
         ]
+        if profile_path:
+            cmd.extend(["--profile", profile_path])
 
-        timeout = settings.browsertrix_time_limit + 60
+        timeout = settings.browsertrix_time_limit + 120
 
         try:
-            logger.info("Starting browsertrix capture for %s", url)
+            logger.info(
+                "Starting browsertrix capture for %s (limit=%d, profile=%s)",
+                url, config["limit"], "yes" if profile_path else "no",
+            )
+            logger.info("Browsertrix config:\n%s", yaml.dump(config, default_flow_style=False))
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
@@ -148,22 +192,34 @@ class BrowsertrixService:
                 await proc.wait()
                 return None
 
+            stdout_text = stdout.decode(errors="replace") if stdout else ""
+            stderr_text = stderr.decode(errors="replace") if stderr else ""
+            # Always log browsertrix output for debugging
+            for line in stdout_text.splitlines()[-30:]:
+                logger.info("browsertrix: %s", line)
+            if stderr_text.strip():
+                for line in stderr_text.splitlines()[-10:]:
+                    logger.warning("browsertrix stderr: %s", line)
+
             if proc.returncode != 0:
-                stderr_text = stderr.decode(errors="replace")[-500:] if stderr else ""
                 logger.error(
                     "Browsertrix failed (rc=%d) for %s: %s",
-                    proc.returncode, url, stderr_text,
+                    proc.returncode, url, stderr_text[-500:],
                 )
                 return None
 
             # Find the .wacz file
-            wacz_path = local_dir / "collections" / crawl_id / f"{crawl_id}.wacz"
+            # With named volume, collections are at the volume root;
+            # with bind mount, they're in the capture-specific subdir.
+            crawl_base = Path(settings.browsertrix_crawl_dir) if use_volume else local_dir
+            collection_dir = crawl_base / "collections" / crawl_id
+            wacz_path = collection_dir / f"{crawl_id}.wacz"
             if not wacz_path.exists():
-                wacz_files = list(local_dir.rglob("*.wacz"))
+                wacz_files = list(collection_dir.rglob("*.wacz")) if collection_dir.exists() else []
                 if wacz_files:
                     wacz_path = wacz_files[0]
                 else:
-                    logger.error("No .wacz file found in %s", local_dir)
+                    logger.error("No .wacz file found in %s", collection_dir)
                     return None
 
             # Check size limit
@@ -178,8 +234,8 @@ class BrowsertrixService:
             # Clean 403 entries and rebuild CDXJ as multi-member gzip
             self._rebuild_wacz_index(wacz_path)
 
-            # Find screenshot in the output
-            screenshot_path = self._find_screenshot(local_dir)
+            # Find screenshot in the collection output dir (not the whole volume)
+            screenshot_path = self._find_screenshot(collection_dir)
 
             logger.info(
                 "Browsertrix capture OK: %s (%.1f MB, screenshot=%s)",
@@ -192,6 +248,101 @@ class BrowsertrixService:
             return None
         except Exception as e:
             logger.error("Browsertrix capture error for %s: %s", url, e)
+            return None
+
+    async def _run_warmup(
+        self,
+        origin: str,
+        local_dir: Path,
+        volume_arg: str,
+        use_volume: bool,
+        behavior_container_path: str,
+        chrome_stealth_args: str,
+    ) -> str | None:
+        """Run a lightweight crawl of the domain root to warm up cookies.
+
+        Returns the container path to the saved browser profile (tar.gz),
+        or None if the warm-up failed (non-fatal, capture continues without it).
+        """
+        warmup_id = "warmup"
+        if use_volume:
+            crawls_subdir = local_dir.name  # capture UUID
+            config_path_container = f"/crawls/{crawls_subdir}/warmup-config.yaml"
+            profile_save_path = f"/crawls/{crawls_subdir}/profile.tar.gz"
+        else:
+            config_path_container = "/crawls/warmup-config.yaml"
+            profile_save_path = "/crawls/profile.tar.gz"
+
+        warmup_config = {
+            "seeds": [{"url": origin, "depth": 0, "scopeType": "page"}],
+            "blockRules": DEFAULT_BLOCK_RULES,
+            "blockAds": True,
+            # Run only the custom behavior (human simulation) — skip heavy
+            # built-in behaviors to keep the warm-up fast.
+            "behaviors": [],
+            "customBehaviors": [behavior_container_path],
+            "behaviorTimeout": 30,
+            "postLoadDelay": 3,
+            "netIdleWait": 3,
+            "generateWACZ": False,
+            "limit": 1,
+            "collection": warmup_id,
+            "timeLimit": 60,
+            "waitUntil": ["load", "networkidle2"],
+            "lang": "fr",
+        }
+
+        warmup_config_path = local_dir / "warmup-config.yaml"
+        warmup_config_path.write_text(yaml.dump(warmup_config, default_flow_style=False))
+
+        cmd = [
+            "docker", "run", "--rm",
+            "--ulimit", "nofile=65536:65536",
+            "-v", volume_arg,
+            settings.browsertrix_image,
+            "crawl",
+            "--config", config_path_container,
+            "--extraChromeArgs", chrome_stealth_args,
+            "--saveProfile", profile_save_path,
+        ]
+
+        try:
+            logger.info("Warm-up: visiting %s to set WAF cookies", origin)
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=90)
+
+            stdout_text = stdout.decode(errors="replace") if stdout else ""
+            for line in stdout_text.splitlines()[-10:]:
+                logger.info("warmup: %s", line)
+
+            if proc.returncode != 0:
+                logger.warning(
+                    "Warm-up failed (rc=%d), continuing without profile",
+                    proc.returncode,
+                )
+                return None
+
+            # Verify profile was saved
+            profile_local = local_dir / "profile.tar.gz"
+            if profile_local.exists() and profile_local.stat().st_size > 100:
+                logger.info(
+                    "Warm-up OK: profile saved (%.1f KB)",
+                    profile_local.stat().st_size / 1024,
+                )
+                return profile_save_path
+
+            logger.warning("Warm-up: profile file not found or empty")
+            return None
+
+        except asyncio.TimeoutError:
+            logger.warning("Warm-up timed out, continuing without profile")
+            return None
+        except Exception as e:
+            logger.warning("Warm-up error: %s, continuing without profile", e)
             return None
 
     @staticmethod
@@ -260,7 +411,27 @@ class BrowsertrixService:
             new_cdx_gz = b"".join(cdx_gz_parts)
             new_idx = "\n".join(idx_lines) + "\n"
 
-            # --- Step 3: rebuild the WACZ ZIP ---
+            # --- Step 3: rebuild the WACZ ZIP with updated hashes ---
+            import hashlib
+
+            new_idx_bytes = new_idx.encode()
+
+            # Pre-compute updated datapackage.json with correct hashes
+            with zipfile.ZipFile(wacz_path, "r") as zin:
+                dp = json.loads(zin.read("datapackage.json"))
+            for res in dp.get("resources", []):
+                if res["path"] == "indexes/index.cdx.gz":
+                    res["hash"] = "sha256:" + hashlib.sha256(new_cdx_gz).hexdigest()
+                    res["bytes"] = len(new_cdx_gz)
+                elif res["path"] == "indexes/index.idx":
+                    res["hash"] = "sha256:" + hashlib.sha256(new_idx_bytes).hexdigest()
+                    res["bytes"] = len(new_idx_bytes)
+            new_dp = json.dumps(dp, indent=2).encode()
+            new_digest = json.dumps({
+                "path": "datapackage.json",
+                "hash": "sha256:" + hashlib.sha256(new_dp).hexdigest(),
+            }).encode()
+
             tmp = NamedTemporaryFile(
                 dir=wacz_path.parent, suffix=".wacz", delete=False
             )
@@ -271,7 +442,11 @@ class BrowsertrixService:
                         if info.filename == "indexes/index.cdx.gz":
                             zout.writestr(info, new_cdx_gz)
                         elif info.filename == "indexes/index.idx":
-                            zout.writestr(info, new_idx.encode())
+                            zout.writestr(info, new_idx_bytes)
+                        elif info.filename == "datapackage.json":
+                            zout.writestr(info, new_dp)
+                        elif info.filename == "datapackage-digest.json":
+                            zout.writestr(info, new_digest)
                         else:
                             zout.writestr(info, zin.read(info.filename))
                 Path(tmp.name).replace(wacz_path)
@@ -288,16 +463,75 @@ class BrowsertrixService:
 
     @staticmethod
     def _find_screenshot(local_dir: Path) -> Path | None:
-        """Find a screenshot PNG in the browsertrix output directory."""
-        for f in sorted(local_dir.rglob("*.png")):
-            # Filter out tiny files (favicons, etc.)
-            if f.stat().st_size > 10_000:
-                return f
+        """Extract the full-page screenshot from the browsertrix WARC output.
+
+        Browsertrix-crawler v1.11+ stores screenshots inside a WARC file
+        (screenshots-*.warc.gz) rather than as standalone PNGs on disk.
+        We parse the multi-member gzip WARC to find the PNG resource.
+
+        When multiple seeds are crawled (e.g. warm-up + target), the WARC
+        contains multiple PNGs.  We return the **last** one, which
+        corresponds to the target page (browsertrix processes seeds in order).
+        """
+        # Try standalone PNGs first (older browsertrix versions)
+        # Return the last (most recent) one
+        pngs = [f for f in sorted(local_dir.rglob("*.png")) if f.stat().st_size > 10_000]
+        if pngs:
+            return pngs[-1]
+
+        # Extract from screenshots WARC (v1.11+)
+        for warc_file in local_dir.rglob("screenshots-*.warc.gz"):
+            try:
+                # Decompress all gzip members
+                raw_data = warc_file.read_bytes()
+                all_data = b""
+                stream = io.BytesIO(raw_data)
+                while stream.tell() < len(raw_data):
+                    try:
+                        with gzip.GzipFile(fileobj=stream) as gz:
+                            all_data += gz.read()
+                    except EOFError:
+                        break
+
+                # Find ALL PNG payloads and keep the last one (target page)
+                last_png = None
+                search_from = 0
+                while True:
+                    png_start = all_data.find(b"\x89PNG", search_from)
+                    if png_start == -1:
+                        break
+                    iend = all_data.find(b"IEND", png_start)
+                    if iend == -1:
+                        break
+                    png_data = all_data[png_start : iend + 8]
+                    if len(png_data) >= 10_000:
+                        last_png = png_data
+                    search_from = iend + 8
+
+                if last_png:
+                    out_path = local_dir / "screenshot-fullpage.png"
+                    out_path.write_bytes(last_png)
+                    return out_path
+            except Exception as e:
+                logger.warning("Failed to extract screenshot from WARC: %s", e)
+
         return None
 
     @staticmethod
-    def cleanup(crawl_dir: Path) -> None:
+    def cleanup(crawl_dir: Path, capture_id: uuid.UUID | None = None) -> None:
         try:
             shutil.rmtree(crawl_dir, ignore_errors=True)
         except Exception as e:
             logger.warning("Failed to cleanup browsertrix dir %s: %s", crawl_dir, e)
+
+        # With named volumes, collections are at the volume root
+        if capture_id and settings.browsertrix_docker_volume:
+            collections_dir = (
+                Path(settings.browsertrix_crawl_dir)
+                / "collections"
+                / f"capture-{capture_id}"
+            )
+            try:
+                shutil.rmtree(collections_dir, ignore_errors=True)
+            except Exception as e:
+                logger.warning("Failed to cleanup collections dir %s: %s", collections_dir, e)

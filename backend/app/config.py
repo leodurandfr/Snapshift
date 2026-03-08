@@ -25,10 +25,13 @@ class Settings(BaseSettings):
 
     # Browsertrix (WACZ archive)
     browsertrix_image: str = "webrecorder/browsertrix-crawler:latest"
-    browsertrix_time_limit: int = 180
-    browsertrix_size_limit_mb: int = 200
+    browsertrix_time_limit: int = 600
+    browsertrix_size_limit_mb: int = 1500
     browsertrix_crawl_dir: str = "/tmp/browsertrix-crawls"
     browsertrix_host_crawl_dir: str = ""
+    # Docker named volume for DinD (avoids SMB issues on macOS).
+    # When set, used instead of host_crawl_dir for docker run -v.
+    browsertrix_docker_volume: str = ""
 
     # Server
     backend_port: int = 8000

@@ -1,9 +1,11 @@
 import logging
 import uuid
 from datetime import datetime
+from pathlib import Path
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.models import Capture, CaptureStatus, MonitoredURL
 from app.services.browsertrix import BrowsertrixService
 from app.services.storage import StorageBackend
@@ -23,6 +25,7 @@ class CaptureOrchestrator:
         url: MonitoredURL,
     ) -> Capture:
         capture_id = uuid.uuid4()
+        crawl_dir = Path(settings.browsertrix_crawl_dir) / str(capture_id)
         capture = Capture(
             id=capture_id,
             url_id=url.id,
@@ -43,8 +46,6 @@ class CaptureOrchestrator:
                 await db.commit()
                 await db.refresh(capture)
                 return capture
-
-            crawl_dir = result.wacz_path.parent.parent.parent
 
             try:
                 # 1. Save WACZ archive
@@ -74,7 +75,7 @@ class CaptureOrchestrator:
                         logger.warning("Thumbnail generation failed: %s", e)
 
             finally:
-                self.browsertrix.cleanup(crawl_dir)
+                self.browsertrix.cleanup(crawl_dir, capture_id)
 
             capture.captured_at = datetime.utcnow()
             logger.info("Capture OK: %s", url.url)
@@ -83,6 +84,10 @@ class CaptureOrchestrator:
             capture.status = CaptureStatus.ERROR
             capture.error_message = str(e)[:500]
             logger.error("Capture failed: %s — %s", url.url, e)
+
+        finally:
+            # Always cleanup crawl dir, even on failure
+            self.browsertrix.cleanup(crawl_dir, capture_id)
 
         db.add(capture)
         await db.commit()
