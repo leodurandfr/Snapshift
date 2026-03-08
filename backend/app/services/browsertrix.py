@@ -1,10 +1,14 @@
 import asyncio
+import gzip
+import json
 import logging
 import shutil
 import uuid
 import yaml
+import zipfile
 from dataclasses import dataclass
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 
 from app.config import settings
 
@@ -105,8 +109,8 @@ class BrowsertrixService:
             "screenshot": ["fullPage"],
             # Wait for network idle and full page load before behaviors
             "waitUntil": ["load", "networkidle0"],
-            # Anti-bot detection: realistic browser profile
-            "lang": "fr-FR,fr;q=0.9,en-US;q=0.8,en;q=0.7",
+            # Browser locale (ISO-639-1 code only)
+            "lang": "fr",
         }
 
         config_path = local_dir / "crawl-config.yaml"
@@ -120,7 +124,7 @@ class BrowsertrixService:
             "crawl",
             "--config", "/crawls/crawl-config.yaml",
             # Stealth flags to reduce bot detection by WAFs (Akamai, etc.)
-            "--chromeOptions",
+            "--extraChromeArgs",
             "--disable-blink-features=AutomationControlled",
         ]
 
@@ -171,6 +175,9 @@ class BrowsertrixService:
                 )
                 return None
 
+            # Clean 403 entries and rebuild CDXJ as multi-member gzip
+            self._rebuild_wacz_index(wacz_path)
+
             # Find screenshot in the output
             screenshot_path = self._find_screenshot(local_dir)
 
@@ -186,6 +193,98 @@ class BrowsertrixService:
         except Exception as e:
             logger.error("Browsertrix capture error for %s: %s", url, e)
             return None
+
+    @staticmethod
+    def _rebuild_wacz_index(wacz_path: Path) -> None:
+        """Clean and rebuild the WACZ CDXJ index.
+
+        Two fixes applied:
+        1. Remove 403 responses (CDN bot-detection artifacts like Akamai).
+        2. Rebuild index.cdx.gz as multi-member gzip with a correct index.idx.
+           Browsertrix-crawler sometimes emits a single-member gzip, which
+           makes ReplayWeb.page unable to find entries beyond the first block.
+        """
+        BLOCK_SIZE = 100  # CDXJ lines per gzip member
+
+        try:
+            with zipfile.ZipFile(wacz_path, "r") as zin:
+                cdx_data = gzip.decompress(zin.read("indexes/index.cdx.gz")).decode()
+
+            # --- Step 1: filter out 403 entries ---
+            filtered = []
+            removed = 0
+            for line in cdx_data.splitlines():
+                if not line.strip():
+                    continue
+                parts = line.split(" ", 2)
+                if len(parts) >= 3:
+                    try:
+                        meta = json.loads(parts[2])
+                        if meta.get("status") == "403":
+                            removed += 1
+                            continue
+                    except (json.JSONDecodeError, KeyError):
+                        pass
+                filtered.append(line)
+
+            if removed:
+                logger.info("Cleaned WACZ index: removed %d x 403 entries", removed)
+
+            # --- Step 2: rebuild as multi-member gzip + index.idx ---
+            # Split CDXJ lines into blocks, compress each as a separate
+            # gzip member. Build index.idx with byte offsets per block.
+            cdx_gz_parts = []
+            idx_lines = ['!meta 0 {"format":"cdxj-gzip-1.0","filename":"index.cdx.gz"}']
+            offset = 0
+
+            for i in range(0, len(filtered), BLOCK_SIZE):
+                block_lines = filtered[i : i + BLOCK_SIZE]
+                block_bytes = ("\n".join(block_lines) + "\n").encode()
+                compressed = gzip.compress(block_bytes)
+
+                # index.idx entry: first SURT key + timestamp of the block
+                first_line = block_lines[0]
+                parts = first_line.split(" ", 2)
+                surt_key = parts[0] if parts else ""
+                timestamp = parts[1] if len(parts) > 1 else ""
+                idx_meta = json.dumps({
+                    "offset": offset,
+                    "length": len(compressed),
+                    "filename": "index.cdx.gz",
+                })
+                idx_lines.append(f"{surt_key} {timestamp} {idx_meta}")
+
+                cdx_gz_parts.append(compressed)
+                offset += len(compressed)
+
+            new_cdx_gz = b"".join(cdx_gz_parts)
+            new_idx = "\n".join(idx_lines) + "\n"
+
+            # --- Step 3: rebuild the WACZ ZIP ---
+            tmp = NamedTemporaryFile(
+                dir=wacz_path.parent, suffix=".wacz", delete=False
+            )
+            try:
+                with zipfile.ZipFile(wacz_path, "r") as zin, \
+                     zipfile.ZipFile(tmp.name, "w") as zout:
+                    for info in zin.infolist():
+                        if info.filename == "indexes/index.cdx.gz":
+                            zout.writestr(info, new_cdx_gz)
+                        elif info.filename == "indexes/index.idx":
+                            zout.writestr(info, new_idx.encode())
+                        else:
+                            zout.writestr(info, zin.read(info.filename))
+                Path(tmp.name).replace(wacz_path)
+                logger.info(
+                    "Rebuilt WACZ index: %d entries in %d blocks",
+                    len(filtered), len(cdx_gz_parts),
+                )
+            except Exception:
+                Path(tmp.name).unlink(missing_ok=True)
+                raise
+
+        except Exception as e:
+            logger.warning("Failed to rebuild WACZ index: %s", e)
 
     @staticmethod
     def _find_screenshot(local_dir: Path) -> Path | None:
