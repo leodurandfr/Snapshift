@@ -148,7 +148,7 @@ class BrowsertrixService:
             "limit": 1,
             "collection": crawl_id,
             "timeLimit": settings.browsertrix_time_limit,
-            "screenshot": ["fullPage"],
+            "screenshot": ["view"],
             "waitUntil": ["load", "networkidle2"],
             "lang": "fr",
         }
@@ -509,7 +509,7 @@ class BrowsertrixService:
                     search_from = iend + 8
 
                 if last_png:
-                    out_path = local_dir / "screenshot-fullpage.png"
+                    out_path = local_dir / "screenshot.png"
                     out_path.write_bytes(last_png)
                     return out_path
             except Exception as e:
