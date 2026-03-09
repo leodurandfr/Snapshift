@@ -74,6 +74,19 @@ _REPLAY_PATCH = r"""<script>
     };
   },10);
 
+  /* --- Force scroll: prevent JS from blocking scroll events --- */
+  /* Sites (Shopify, cookie banners, etc.) add non-passive wheel/touchmove  */
+  /* listeners that call preventDefault(), killing scroll ~1s after load.   */
+  /* We force these listeners passive so preventDefault() becomes a no-op.  */
+  var _origAEL2=EventTarget.prototype.addEventListener;
+  EventTarget.prototype.addEventListener=function(t,h,o){
+    if(/^(wheel|touchmove|touchstart|scroll)$/.test(t)){
+      if(typeof o==='object'&&o!==null)o=Object.assign({},o,{passive:true});
+      else o={capture:!!o,passive:true};
+    }
+    return _origAEL2.call(this,t,h,o);
+  };
+
   /* --- Force page visibility (anti-blank-page) --- */
   /* SPAs and SFCC sites hide the page (opacity:0, visibility:hidden, etc.)     */
   /* until JS initialization completes. When JS crashes in replay, the SSR      */
@@ -92,7 +105,11 @@ _REPLAY_PATCH = r"""<script>
     /* don't work in archive replay and block the actual page content.     */
     '[role="dialog"],[role="alertdialog"],[aria-modal="true"]{',
     'display:none!important}',
-    '[class*="backdrop"]{display:none!important}'
+    '[class*="backdrop"]{display:none!important}',
+    /* Hide consent/tracking iframes (TCF, CMP, analytics) — invisible 0×0  */
+    /* frames that serve no purpose in archive replay.                       */
+    'iframe[name*="tcfapi"],iframe[name*="__cmp"],iframe[name*="__usp"],',
+    'iframe[name*="googlefcPresent"],iframe[name*="__tcfapi"]{display:none!important}'
   ].join('');
   (document.head||document.documentElement).appendChild(vs);
 
@@ -106,6 +123,9 @@ _REPLAY_PATCH = r"""<script>
       if(s.visibility==='hidden')s.visibility='visible';
       if(s.display==='none'&&el.tagName!=='SCRIPT'&&el.tagName!=='STYLE')s.display='';
     });
+    /* Force scroll on html/body (JS may have set overflow:hidden inline) */
+    document.documentElement.style.setProperty('overflow','auto','important');
+    document.body.style.setProperty('overflow','auto','important');
     /* Remove loading/preload classes from html and body */
     ['loading','is-loading','not-ready','preload','no-js'].forEach(function(c){
       document.documentElement.classList.remove(c);
