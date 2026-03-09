@@ -1,6 +1,7 @@
 import asyncio
 import logging
 import signal
+from datetime import datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,6 +15,9 @@ from app.services.storage import LocalStorage
 
 logger = logging.getLogger(__name__)
 
+JOB_TIMEOUT = settings.browsertrix_time_limit + 180  # capture + overhead
+STALE_JOB_MINUTES = 20  # jobs RUNNING longer than this are considered stuck
+
 
 class Worker:
     def __init__(self, poll_interval: float = 2.0):
@@ -26,7 +30,8 @@ class Worker:
         logger.info("Worker starting...")
         self._running = True
 
-        # Setup graceful shutdown
+        await self._recover_stale_jobs()
+
         loop = asyncio.get_event_loop()
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, self._shutdown)
@@ -49,7 +54,6 @@ class Worker:
 
     async def _poll_and_execute(self) -> bool:
         async with async_session() as db:
-            # Pick the oldest pending job with optimistic locking
             job = await self._claim_job(db)
             if not job:
                 return False
@@ -57,17 +61,20 @@ class Worker:
             logger.info(f"Processing job {job.id} for URL {job.url_id}")
 
             try:
-                # Load the monitored URL
                 url = await db.get(MonitoredURL, job.url_id)
                 if not url:
                     await self._fail_job(db, job, "Monitored URL not found")
                     return True
 
-                # Execute capture via browsertrix
-                await self._orchestrator.execute(db=db, url=url)
-
-                # Mark job completed
+                await asyncio.wait_for(
+                    self._orchestrator.execute(db=db, url=url),
+                    timeout=JOB_TIMEOUT,
+                )
                 await self._complete_job(db, job)
+
+            except asyncio.TimeoutError:
+                logger.error(f"Job {job.id} timed out after {JOB_TIMEOUT}s")
+                await self._fail_job(db, job, f"Capture timed out after {JOB_TIMEOUT}s")
 
             except Exception as e:
                 logger.error(f"Job {job.id} failed: {e}")
@@ -76,7 +83,6 @@ class Worker:
             return True
 
     async def _claim_job(self, db: AsyncSession) -> CaptureJob | None:
-        # Select oldest pending job
         result = await db.execute(
             select(CaptureJob)
             .where(CaptureJob.status == JobStatus.PENDING)
@@ -88,9 +94,7 @@ class Worker:
         if not job:
             return None
 
-        # Mark as running
         job.status = JobStatus.RUNNING
-        from datetime import datetime
         job.started_at = datetime.utcnow()
         await notify_job_update(db, job)
         await db.commit()
@@ -98,16 +102,35 @@ class Worker:
         return job
 
     async def _complete_job(self, db: AsyncSession, job: CaptureJob):
-        from datetime import datetime
         job.status = JobStatus.COMPLETED
         job.completed_at = datetime.utcnow()
         await notify_job_update(db, job)
         await db.commit()
 
     async def _fail_job(self, db: AsyncSession, job: CaptureJob, error: str):
-        from datetime import datetime
         job.status = JobStatus.FAILED
         job.completed_at = datetime.utcnow()
         job.error_message = error
         await notify_job_update(db, job)
         await db.commit()
+
+    async def _recover_stale_jobs(self):
+        """Fail jobs stuck in RUNNING/PENDING for too long (worker crash recovery)."""
+        cutoff = datetime.utcnow() - timedelta(minutes=STALE_JOB_MINUTES)
+        async with async_session() as db:
+            result = await db.execute(
+                select(CaptureJob)
+                .where(
+                    CaptureJob.status.in_([JobStatus.RUNNING, JobStatus.PENDING]),
+                    CaptureJob.created_at < cutoff,
+                )
+            )
+            stale_jobs = result.scalars().all()
+            for job in stale_jobs:
+                job.status = JobStatus.FAILED
+                job.completed_at = datetime.utcnow()
+                job.error_message = "Recovered: job was stuck (worker crash or timeout)"
+                await notify_job_update(db, job)
+            if stale_jobs:
+                await db.commit()
+                logger.warning(f"Recovered {len(stale_jobs)} stale job(s)")

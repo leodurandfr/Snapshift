@@ -1,4 +1,6 @@
 import logging
+import uuid as uuid_mod
+from datetime import datetime, timedelta
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -10,6 +12,8 @@ from app.models import CaptureJob, JobStatus, MonitoredURL
 from app.services.notifier import notify_job_update
 
 logger = logging.getLogger(__name__)
+
+STALE_JOB_MINUTES = 20
 
 SCHEDULE_MAP = {
     "every_1h": IntervalTrigger(hours=1),
@@ -25,7 +29,6 @@ SCHEDULE_MAP = {
 def _parse_schedule(schedule: str):
     if schedule in SCHEDULE_MAP:
         return SCHEDULE_MAP[schedule]
-    # Try to parse "every_Xh" pattern
     if schedule.startswith("every_") and schedule.endswith("h"):
         try:
             hours = int(schedule[6:-1])
@@ -42,6 +45,7 @@ class CaptureScheduler:
     async def start(self):
         await self._load_all_urls()
         self._add_retention_job()
+        self._add_stale_job_cleanup()
         self.scheduler.start()
         logger.info("Scheduler started")
 
@@ -56,6 +60,38 @@ class CaptureScheduler:
             misfire_grace_time=7200,
         )
         logger.info("Retention cleanup job scheduled (daily at 3:00 AM)")
+
+    def _add_stale_job_cleanup(self):
+        self.scheduler.add_job(
+            self._cleanup_stale_jobs,
+            trigger=IntervalTrigger(minutes=5),
+            id="stale_job_cleanup",
+            replace_existing=True,
+            misfire_grace_time=300,
+        )
+        logger.info("Stale job cleanup scheduled (every 5 min)")
+
+    @staticmethod
+    async def _cleanup_stale_jobs():
+        """Fail jobs stuck in RUNNING for more than STALE_JOB_MINUTES."""
+        cutoff = datetime.utcnow() - timedelta(minutes=STALE_JOB_MINUTES)
+        async with async_session() as db:
+            result = await db.execute(
+                select(CaptureJob)
+                .where(
+                    CaptureJob.status == JobStatus.RUNNING,
+                    CaptureJob.started_at < cutoff,
+                )
+            )
+            stale_jobs = result.scalars().all()
+            for job in stale_jobs:
+                job.status = JobStatus.FAILED
+                job.completed_at = datetime.utcnow()
+                job.error_message = f"Capture timed out (stuck for >{STALE_JOB_MINUTES} min)"
+                await notify_job_update(db, job)
+            if stale_jobs:
+                await db.commit()
+                logger.warning(f"Cleaned up {len(stale_jobs)} stale job(s)")
 
     async def stop(self):
         self.scheduler.shutdown(wait=False)
@@ -101,15 +137,11 @@ class CaptureScheduler:
 
     @staticmethod
     async def _create_capture_jobs(url_id: str):
-        import uuid as uuid_mod
-        from datetime import datetime, timedelta, timezone
-
         async with async_session() as db:
             url = await db.get(MonitoredURL, uuid_mod.UUID(url_id))
             if not url or not url.is_active:
                 return
 
-            # Skip if there's already a pending/running job for this URL
             existing = await db.execute(
                 select(CaptureJob)
                 .where(
@@ -122,8 +154,7 @@ class CaptureScheduler:
                 logger.debug(f"Skipping job for {url.url}: active job exists")
                 return
 
-            # Skip if last job failed less than 1 hour ago (avoid retry loop)
-            cutoff = datetime.now(timezone.utc) - timedelta(hours=1)
+            cutoff = datetime.utcnow() - timedelta(hours=1)
             last_failed = await db.execute(
                 select(CaptureJob)
                 .where(
@@ -141,7 +172,6 @@ class CaptureScheduler:
                 logger.info(f"Skipping job for {url.url}: last job failed < 1h ago")
                 return
 
-            # One job per URL (browsertrix captures the full page)
             job = CaptureJob(
                 url_id=url.id,
                 viewport_label="Archive",
