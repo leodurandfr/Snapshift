@@ -15,7 +15,7 @@ class ForceLoadLazy {
 
   static init() {
     return {
-      state: { scrolled: 0, imagesForced: 0, urlsFetched: 0, chunksFetched: 0 },
+      state: { scrolled: 0, imagesForced: 0, urlsFetched: 0, chunksFetched: 0, videosTriggered: 0 },
       opts: {},
     };
   }
@@ -320,7 +320,7 @@ class ForceLoadLazy {
       if (nextDataEl) {
         var nextDataText = nextDataEl.textContent || "";
         // Extract all image/video URLs from the JSON
-        var urlRegex = /https?:\/\/[^"\\]+\.(?:png|jpg|jpeg|webp|gif|svg|mp4)(?:[^"\\]*)/g;
+        var urlRegex = /https?:\/\/[^"\\]+\.(?:png|jpg|jpeg|webp|gif|svg|mp4|webm|m4v|m3u8)(?:[^"\\]*)/g;
         var ndMatch;
         var nextDataUrls = [];
         var ndSeen = {};
@@ -357,7 +357,7 @@ class ForceLoadLazy {
       for (var isi = 0; isi < inlineScripts.length; isi++) {
         var isText = inlineScripts[isi].textContent || "";
         var isMatch;
-        var isRegex = /https?:\/\/[^"\\]+\.(?:png|jpg|jpeg|webp|gif|svg|mp4)(?:[^"\\]*)/g;
+        var isRegex = /https?:\/\/[^"\\]+\.(?:png|jpg|jpeg|webp|gif|svg|mp4|webm|m4v|m3u8)(?:[^"\\]*)/g;
         while ((isMatch = isRegex.exec(isText)) !== null) {
           if (!inlineSeen[isMatch[0]]) {
             inlineSeen[isMatch[0]] = true;
@@ -381,6 +381,52 @@ class ForceLoadLazy {
       // ignore
     }
 
+    // --- Intercept dynamic video sources via MutationObserver ---
+    // Many sites (Apple, Nike, etc.) inject <source> into <video> via
+    // IntersectionObserver and may remove them when the video leaves the
+    // viewport. We observe the entire DOM and immediately fetch any video
+    // URL that appears, ensuring it ends up in the WACZ even if removed.
+    var capturedVideoUrls = {};
+    var videoSourceObserver = new MutationObserver(function(mutations) {
+      for (var mi = 0; mi < mutations.length; mi++) {
+        var mut = mutations[mi];
+        // Watch for <source> elements added to <video>
+        for (var ni = 0; ni < mut.addedNodes.length; ni++) {
+          var node = mut.addedNodes[ni];
+          if (node.tagName === "SOURCE" && node.parentElement && node.parentElement.tagName === "VIDEO") {
+            var src = node.getAttribute("src");
+            if (src && !capturedVideoUrls[src]) {
+              capturedVideoUrls[src] = true;
+              fetch(src, { mode: "no-cors" }).catch(function() {});
+            }
+          }
+          // Also handle <video> elements added with src
+          if (node.tagName === "VIDEO" && node.getAttribute("src")) {
+            var vsrc = node.getAttribute("src");
+            if (!capturedVideoUrls[vsrc]) {
+              capturedVideoUrls[vsrc] = true;
+              fetch(vsrc, { mode: "no-cors" }).catch(function() {});
+            }
+          }
+        }
+        // Watch for src attribute changes on <video> or <source>
+        if (mut.type === "attributes" && mut.attributeName === "src") {
+          var t = mut.target;
+          if (t.tagName === "VIDEO" || (t.tagName === "SOURCE" && t.parentElement && t.parentElement.tagName === "VIDEO")) {
+            var asrc = t.getAttribute("src");
+            if (asrc && !capturedVideoUrls[asrc]) {
+              capturedVideoUrls[asrc] = true;
+              fetch(asrc, { mode: "no-cors" }).catch(function() {});
+            }
+          }
+        }
+      }
+    });
+    videoSourceObserver.observe(document.documentElement, {
+      childList: true, subtree: true,
+      attributes: true, attributeFilter: ["src"]
+    });
+
     // --- Scroll down to trigger IntersectionObserver lazy loading ---
     var scrollHeight = function() {
       return Math.max(
@@ -398,7 +444,25 @@ class ForceLoadLazy {
 
     while (pos < scrollHeight()) {
       window.scrollTo({ top: pos, behavior: "smooth" });
-      await sleep(300);
+
+      // Check if there's a video near the current viewport — if so, pause
+      // longer to let IntersectionObserver trigger source injection
+      var hasVideoNearby = false;
+      var vids = document.querySelectorAll("video");
+      for (var vci = 0; vci < vids.length; vci++) {
+        var vRect = vids[vci].getBoundingClientRect();
+        // Video is in or near the viewport (within 1 viewport height)
+        if (vRect.bottom > -viewportHeight && vRect.top < viewportHeight * 2) {
+          hasVideoNearby = true;
+          break;
+        }
+      }
+
+      if (hasVideoNearby) {
+        await sleep(1500); // Longer pause for video sections
+      } else {
+        await sleep(300);
+      }
 
       var newHeight = scrollHeight();
       if (newHeight > lastHeight) {
@@ -411,7 +475,7 @@ class ForceLoadLazy {
     }
 
     window.scrollTo({ top: scrollHeight(), behavior: "smooth" });
-    await sleep(1500);
+    await sleep(2000);
 
     yield { msg: "Scroll complete (" + pos + "px)" };
 
@@ -486,6 +550,62 @@ class ForceLoadLazy {
       if (imgSrc) urlsToFetch.push(imgSrc);
     }
 
+    // --- Collect video sources: <video src>, <video poster>, <source src> ---
+    // The MutationObserver above already captured dynamically-added sources
+    // during the scroll. Here we also collect any that exist in the DOM now
+    // and trigger loading on videos that have sources.
+    var videoEls = document.querySelectorAll("video");
+    var videoCount = 0;
+    for (var vi = 0; vi < videoEls.length; vi++) {
+      var video = videoEls[vi];
+      // Collect poster image
+      var poster = video.getAttribute("poster");
+      if (poster) urlsToFetch.push(poster);
+      // Collect video src attribute
+      var vSrc = video.getAttribute("src");
+      if (vSrc) urlsToFetch.push(vSrc);
+      // Collect all <source> children
+      var sources = video.querySelectorAll("source");
+      for (var vsi = 0; vsi < sources.length; vsi++) {
+        var sSrc = sources[vsi].getAttribute("src");
+        if (sSrc) urlsToFetch.push(sSrc);
+      }
+      // Activate data-src (lazy video pattern)
+      var vDataSrc = video.getAttribute("data-src");
+      if (vDataSrc) {
+        video.setAttribute("src", vDataSrc);
+        urlsToFetch.push(vDataSrc);
+      }
+      // Try to trigger loading on any video that has a source
+      var hasSrc = vSrc || vDataSrc || sources.length > 0;
+      if (hasSrc) {
+        try {
+          video.preload = "auto";
+          video.load();
+          video.play().catch(function() {});
+          videoCount++;
+        } catch (e) { /* ignore */ }
+      }
+    }
+
+    // Include URLs captured by the MutationObserver during scroll
+    for (var cvu in capturedVideoUrls) {
+      urlsToFetch.push(cvu);
+    }
+    var observedCount = Object.keys(capturedVideoUrls).length;
+
+    // Stop the observer now that scroll + collection are done
+    videoSourceObserver.disconnect();
+
+    if (videoCount > 0 || observedCount > 0) {
+      yield { msg: "Videos: " + videoCount + " with sources, " + observedCount + " URLs caught by observer" };
+      // Wait for triggered videos to buffer
+      await sleep(3000);
+      for (var vpi = 0; vpi < videoEls.length; vpi++) {
+        try { videoEls[vpi].pause(); } catch (e) {}
+      }
+    }
+
     // Collect background-image URLs from computed styles
     var allElements = document.querySelectorAll("*");
     for (var s = 0; s < allElements.length && s < 2000; s++) {
@@ -532,7 +652,7 @@ class ForceLoadLazy {
     yield { msg: "Fetched " + fetchList.length + " resource URLs" };
 
     yield {
-      msg: "Done! Scrolled " + state.scrolled + "px, forced " + state.imagesForced + " lazy images, fetched " + state.urlsFetched + " URLs, " + state.chunksFetched + " chunks",
+      msg: "Done! Scrolled " + state.scrolled + "px, forced " + state.imagesForced + " lazy images, " + videoCount + " videos triggered (" + observedCount + " via observer), fetched " + state.urlsFetched + " URLs, " + state.chunksFetched + " chunks",
     };
   }
 }

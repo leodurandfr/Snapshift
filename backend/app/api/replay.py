@@ -160,6 +160,7 @@ _REPLAY_PATCH = r"""<script>
   setTimeout(fixAllImgs,3000);
   setTimeout(fixAllImgs,6000);
   setTimeout(fixAllImgs,10000);
+
 })();
 </script>""".strip().replace("\n", "")
 
@@ -184,6 +185,7 @@ self.addEventListener = function(type, handler, opts) {{
         return _origRW(Promise.resolve(p).then(function(resp) {{
           try {{
             var ct = resp.headers.get('content-type') || '';
+
             // Inject patch into HTML responses
             if (ct.indexOf('text/html') !== -1) {{
               return resp.text().then(function(text) {{
@@ -207,7 +209,7 @@ self.addEventListener = function(type, handler, opts) {{
               var url = event.request.url || '';
               var isRWPApi = /\/w\/api\//.test(url);
               if (!isRWPApi) {{
-                var isAsset = /\\.(js|css|png|jpe?g|gif|svg|webp|woff2?|ttf|eot|ico)(\\?|$)/i.test(url);
+                var isAsset = /\\.(js|css|png|jpe?g|gif|svg|webp|woff2?|ttf|eot|ico|mp4|webm|m4v|m3u8|ts|ogg|aac|mp3|avif)(\\?|$)/i.test(url);
                 if (!isAsset) {{
                   return new Response('{{}}', {{
                     status: 200,
