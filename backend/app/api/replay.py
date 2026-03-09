@@ -87,6 +87,42 @@ _REPLAY_PATCH = r"""<script>
     return _origAEL2.call(this,t,h,o);
   };
 
+  /* --- Prevent JS from locking scroll (cookie banner overflow:hidden) --- */
+  /* CMPs set overflow:hidden on html/body via inline style OR CSS classes */
+  /* (e.g. .no-scroll, .overflow-hidden). We fight back on all fronts:    */
+  /* 1. MutationObserver on style + class attributes with !important      */
+  /* 2. CSS rule html,body{overflow:auto!important} in stylesheet         */
+  /* 3. Strip scroll-lock classes from html/body                          */
+  var _scrollLockRe=/\b(no-?scroll|overflow-?hidden|scroll-?lock|modal-?open|body-?fixed|is-?locked|prevent-?scroll|noscroll)\b/i;
+  var _sgBusy=false;
+  function _forceScroll(el){
+    if(_sgBusy)return;
+    _sgBusy=true;
+    var s=el.style;
+    if(s.getPropertyValue('overflow')==='hidden')s.setProperty('overflow','auto','important');
+    if(s.getPropertyValue('overflow-y')==='hidden')s.setProperty('overflow-y','auto','important');
+    if(s.getPropertyValue('position')==='fixed')s.setProperty('position','static','important');
+    var cls=el.getAttribute('class')||'';
+    if(_scrollLockRe.test(cls)){
+      el.setAttribute('class',cls.replace(new RegExp(_scrollLockRe.source,'gi'),'').trim());
+    }
+    setTimeout(function(){_sgBusy=false},0);
+  }
+  var _scrollGuard=new MutationObserver(function(muts){
+    for(var i=0;i<muts.length;i++){
+      _forceScroll(muts[i].target);
+    }
+  });
+  function _startScrollGuard(){
+    var targets=[document.documentElement,document.body];
+    for(var i=0;i<targets.length;i++){
+      _forceScroll(targets[i]);
+      _scrollGuard.observe(targets[i],{attributes:true,attributeFilter:['style','class']});
+    }
+  }
+  if(document.body)_startScrollGuard();
+  else document.addEventListener('DOMContentLoaded',_startScrollGuard);
+
   /* --- Force page visibility (anti-blank-page) --- */
   /* SPAs and SFCC sites hide the page (opacity:0, visibility:hidden, etc.)     */
   /* until JS initialization completes. When JS crashes in replay, the SSR      */
@@ -94,6 +130,9 @@ _REPLAY_PATCH = r"""<script>
   /* and delayed inline-style cleanup.                                          */
   var vs=document.createElement('style');
   vs.textContent=[
+    /* Force scroll on html/body — nuclear override for cookie banner scroll lock */
+    'html,body{overflow:auto!important;overflow-y:auto!important;',
+    'position:static!important;height:auto!important;touch-action:auto!important}',
     'html,body,#app,#root,#__next,[data-app],main,.app-wrapper,.page-wrapper,',
     '.lv-page,.lv-app,[data-component]:not([role="dialog"]):not([role="alertdialog"]){',
     'opacity:1!important;visibility:visible!important;overflow:visible!important}',
@@ -123,9 +162,6 @@ _REPLAY_PATCH = r"""<script>
       if(s.visibility==='hidden')s.visibility='visible';
       if(s.display==='none'&&el.tagName!=='SCRIPT'&&el.tagName!=='STYLE')s.display='';
     });
-    /* Force scroll on html/body (JS may have set overflow:hidden inline) */
-    document.documentElement.style.setProperty('overflow','auto','important');
-    document.body.style.setProperty('overflow','auto','important');
     /* Remove loading/preload classes from html and body */
     ['loading','is-loading','not-ready','preload','no-js'].forEach(function(c){
       document.documentElement.classList.remove(c);
@@ -135,6 +171,26 @@ _REPLAY_PATCH = r"""<script>
     document.querySelectorAll('img').forEach(function(img){
       if(img.complete)img.dispatchEvent(new Event('load'));
     });
+    /* Remove cookie/consent overlays from DOM.                              */
+    /* Only removes elements that LOOK like banners: fixed/sticky position   */
+    /* or high z-index. This avoids nuking layout containers that happen     */
+    /* to have "cookie" in their class (e.g. "cookie-accepted" on body).    */
+    var cookieKw=/cookie|consent|gdpr|onetrust|cookiebot|didomi|trustarcbar|axeptio|cmp-container|cookie-banner|cookie-notice|cc-banner|cc_banner/i;
+    document.querySelectorAll('[id],[class]').forEach(function(el){
+      if(el.tagName==='SCRIPT'||el.tagName==='STYLE'||el.tagName==='LINK')return;
+      if(el===document.body||el===document.documentElement)return;
+      var id=el.id||'';var cls=el.className||'';
+      if(typeof cls!=='string')cls=cls.toString();
+      if(!cookieKw.test(id)&&!cookieKw.test(cls))return;
+      var cs=window.getComputedStyle(el);
+      var pos=cs.position;
+      var zi=parseInt(cs.zIndex,10)||0;
+      var isOverlay=(pos==='fixed'||pos==='sticky'||zi>100);
+      if(isOverlay){try{el.remove()}catch(e){}}
+    });
+    /* Re-trigger scroll guard after overlay removal */
+    _forceScroll(document.documentElement);
+    _forceScroll(document.body);
   }
   setTimeout(forceVisible,1500);
   setTimeout(forceVisible,3000);
