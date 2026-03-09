@@ -145,11 +145,11 @@ function formatSchedule(schedule: string): string {
             @click="router.push(`/urls/${url.id}`)"
           >
             <TableCell>
-              <div class="w-12 h-8 bg-muted rounded overflow-hidden">
+              <div class="w-18 h-12 bg-muted rounded overflow-hidden">
                 <img
                   v-if="url.last_thumbnail"
                   :src="capturesStore.thumbnailUrl(url.last_capture_id!)"
-                  class="w-full h-full object-cover"
+                  class="w-full h-full object-cover object-top"
                   alt=""
                 />
               </div>

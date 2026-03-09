@@ -25,7 +25,6 @@ import ArchiveViewer from '@/components/captures/ArchiveViewer.vue'
 import { useUrlsStore } from '@/stores/urls'
 import { useCapturesStore } from '@/stores/captures'
 import { useJobsStore } from '@/stores/jobs'
-import api from '@/lib/api'
 import type { Capture, URLUpdatePayload } from '@/types'
 
 const route = useRoute()
@@ -36,7 +35,6 @@ const jobsStore = useJobsStore()
 
 const urlId = computed(() => route.params.id as string)
 const showEditDialog = ref(false)
-const selectedCapture = ref<Capture | null>(null)
 const archiveViewerCapture = ref<Capture | null>(null)
 const viewportFilter = ref<string>('all')
 
@@ -127,8 +125,8 @@ async function deleteSelected() {
 function handleCaptureClick(capture: Capture) {
   if (selectMode.value) {
     toggleCapture(capture.id)
-  } else {
-    selectedCapture.value = capture
+  } else if (capture.archive_path) {
+    archiveViewerCapture.value = capture
   }
 }
 
@@ -163,21 +161,6 @@ async function handleDelete() {
     toast.success('URL deleted')
   } catch {
     toast.error('Failed to delete')
-  }
-}
-
-async function downloadArchive(captureId: string) {
-  try {
-    const response = await api.get(`/captures/${captureId}/archive`, { responseType: 'blob' })
-    const blob = new Blob([response.data], { type: 'application/zip' })
-    const url = URL.createObjectURL(blob)
-    const a = document.createElement('a')
-    a.href = url
-    a.download = `capture-${captureId}.wacz`
-    a.click()
-    URL.revokeObjectURL(url)
-  } catch {
-    toast.error('Failed to download archive')
   }
 }
 
@@ -346,11 +329,11 @@ function formatBytes(bytes: number | null): string {
           </div>
         </div>
         <div class="p-2 space-y-1">
-          <p class="text-xs font-medium">{{ capture.viewport_label }}</p>
-          <p class="text-xs text-muted-foreground">{{ formatDate(capture.captured_at) }}</p>
+          <p class="text-xs font-medium">{{ formatDate(capture.captured_at) }}</p>
           <div class="flex items-center gap-2">
             <Badge
-              :variant="capture.status === 'success' ? 'default' : 'destructive'"
+              v-if="capture.status !== 'success'"
+              variant="destructive"
               class="text-[10px] px-1.5 py-0"
             >
               {{ capture.status }}
@@ -377,42 +360,6 @@ function formatBytes(bytes: number | null): string {
       No captures yet. Click "Capture now" to take the first screenshot.
     </p>
 
-    <!-- Full-size viewer dialog -->
-    <Dialog :open="!!selectedCapture" @update:open="selectedCapture = null">
-      <DialogContent class="max-w-5xl max-h-[90vh] overflow-auto">
-        <DialogHeader>
-          <DialogTitle>
-            {{ selectedCapture?.viewport_label }} — {{ selectedCapture ? formatDate(selectedCapture.captured_at) : '' }}
-          </DialogTitle>
-        </DialogHeader>
-        <div v-if="selectedCapture" class="space-y-3">
-          <img
-            :src="capturesStore.screenshotUrl(selectedCapture.id)"
-            class="w-full rounded border"
-            alt="Full screenshot"
-          />
-          <div class="flex items-center gap-3 text-sm text-muted-foreground">
-            <span>Size: {{ formatBytes(selectedCapture.file_size) }}</span>
-            <span v-if="selectedCapture.archive_size">Archive: {{ formatBytes(selectedCapture.archive_size) }}</span>
-            <button
-              v-if="selectedCapture.archive_path"
-              class="text-primary underline"
-              @click="archiveViewerCapture = selectedCapture"
-            >
-              Preview archive
-            </button>
-            <button
-              v-if="selectedCapture.archive_path"
-              class="text-primary underline"
-              @click="downloadArchive(selectedCapture!.id)"
-            >
-              Download archive
-            </button>
-          </div>
-        </div>
-      </DialogContent>
-    </Dialog>
-
     <!-- Edit dialog -->
     <Dialog v-model:open="showEditDialog">
       <DialogContent class="max-w-lg">
@@ -427,7 +374,7 @@ function formatBytes(bytes: number | null): string {
     <ArchiveViewer
       :capture-id="archiveViewerCapture?.id ?? ''"
       :open="!!archiveViewerCapture"
-      :capture-label="archiveViewerCapture ? `${archiveViewerCapture.viewport_label} — ${formatDate(archiveViewerCapture.captured_at)}` : undefined"
+      :capture-label="archiveViewerCapture ? `${urlsStore.currentUrl?.label || urlsStore.currentUrl?.url || ''} — ${formatDate(archiveViewerCapture.captured_at)}` : undefined"
       @update:open="!$event && (archiveViewerCapture = null)"
     />
   </div>

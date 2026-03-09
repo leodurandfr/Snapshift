@@ -79,6 +79,121 @@ class ForceLoadLazy {
 
     yield { msg: "Human interaction simulation done" };
 
+    // --- Step 0a: Dismiss modals, dialogs, and overlays ---
+    // Many sites show popups (cookie consent, cart warnings, newsletter,
+    // geolocation) that overlay the real content. If these stay open, the
+    // WACZ archive captures the dialog state instead of the actual page.
+    // We try multiple strategies to close them.
+    yield { msg: "Dismissing popups/modals..." };
+
+    try {
+      var dismissed = 0;
+
+      // Strategy 1: Close native <dialog> elements
+      var dialogs = document.querySelectorAll("dialog[open]");
+      for (var di = 0; di < dialogs.length; di++) {
+        try {
+          dialogs[di].close();
+          dismissed++;
+        } catch (e) { /* ignore */ }
+      }
+
+      // Strategy 2: Click common close/dismiss buttons
+      // Order matters: try specific refusal buttons first ("Non", "Decline",
+      // "Reject"), then generic close buttons.
+      var dismissSelectors = [
+        // Specific refusal/dismiss buttons (e.g. Balenciaga cart warning "Non")
+        'dialog button', 'dialog a',
+        '[role="dialog"] button', '[role="dialog"] a',
+        '[role="alertdialog"] button',
+        // Cookie/consent dismiss
+        'button[id*="reject"]', 'button[id*="decline"]', 'button[id*="refuse"]',
+        'a[id*="reject"]', 'a[id*="decline"]',
+        'button[class*="reject"]', 'button[class*="decline"]', 'button[class*="refuse"]',
+        // Generic close buttons
+        'button[aria-label="Close"]', 'button[aria-label="Fermer"]',
+        'button[aria-label="close"]', 'button[aria-label="fermer"]',
+        '[class*="close-modal"]', '[class*="modal-close"]', '[class*="dialog-close"]',
+        '[class*="popup-close"]', '[class*="overlay-close"]',
+        'button[class*="dismiss"]', 'button[class*="close"]',
+      ];
+
+      // Helper: check if element is visible and clickable
+      function isVisible(el) {
+        if (!el) return false;
+        var rect = el.getBoundingClientRect();
+        if (rect.width === 0 && rect.height === 0) return false;
+        var style = window.getComputedStyle(el);
+        return style.display !== "none" && style.visibility !== "hidden" && parseFloat(style.opacity) > 0;
+      }
+
+      // Helper: check if a button looks like a refusal/close (not "accept" or "continue")
+      function isRefusalOrClose(el) {
+        var text = (el.textContent || "").trim().toLowerCase();
+        var label = (el.getAttribute("aria-label") || "").toLowerCase();
+        var combined = text + " " + label;
+        // Skip buttons that accept/continue (we want to dismiss, not accept)
+        if (/^(oui|yes|accepter|accept|continuer|continue|proceed|ok)$/i.test(text)) return false;
+        // Match close/dismiss/refuse patterns
+        if (/non|no|fermer|close|dismiss|refuser|reject|decline|annuler|cancel|×|✕|✖/i.test(combined)) return true;
+        // Also match if it's inside a dialog and is a secondary/cancel-looking button
+        return false;
+      }
+
+      for (var dsi = 0; dsi < dismissSelectors.length; dsi++) {
+        var btns = document.querySelectorAll(dismissSelectors[dsi]);
+        for (var dbi = 0; dbi < btns.length; dbi++) {
+          var btn = btns[dbi];
+          if (isVisible(btn) && isRefusalOrClose(btn)) {
+            try {
+              btn.click();
+              dismissed++;
+              await sleep(300);
+            } catch (e) { /* ignore */ }
+          }
+        }
+        if (dismissed > 0) break; // Stop after first successful dismissal
+      }
+
+      // Strategy 3: Remove modal overlays from the DOM if still present
+      // (last resort — some modals have no close button)
+      await sleep(500);
+      var overlaySelectors = [
+        'dialog[open]',
+        '[role="dialog"]',
+        '[role="alertdialog"]',
+        '[class*="modal"][class*="overlay"]',
+        '[class*="modal-backdrop"]',
+      ];
+      for (var oi = 0; oi < overlaySelectors.length; oi++) {
+        var overlays = document.querySelectorAll(overlaySelectors[oi]);
+        for (var oj = 0; oj < overlays.length; oj++) {
+          if (isVisible(overlays[oj])) {
+            try {
+              overlays[oj].remove();
+              dismissed++;
+            } catch (e) { /* ignore */ }
+          }
+        }
+      }
+
+      // Strategy 4: Remove body overflow:hidden (modals often lock scroll)
+      if (document.body.style.overflow === "hidden") {
+        document.body.style.overflow = "";
+      }
+      if (document.documentElement.style.overflow === "hidden") {
+        document.documentElement.style.overflow = "";
+      }
+
+      if (dismissed > 0) {
+        await sleep(500);
+      }
+
+      yield { msg: "Dismissed " + dismissed + " popups/modals" };
+    } catch (e) {
+      await log("Modal dismissal error (non-fatal): " + e);
+    }
+
     // --- Step 0: Pre-fetch ALL dynamic JS/CSS chunks ---
     // Next.js/Webpack apps only load chunks on demand. We fetch them all
     // so they're in the WACZ and available during replay.

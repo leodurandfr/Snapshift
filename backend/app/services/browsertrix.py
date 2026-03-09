@@ -4,12 +4,14 @@ import io
 import json
 import logging
 import shutil
+import sqlite3
+import tarfile
 import uuid
 import yaml
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
-from tempfile import NamedTemporaryFile
+from tempfile import NamedTemporaryFile, TemporaryDirectory
 from urllib.parse import urlparse
 
 from app.config import settings
@@ -42,9 +44,12 @@ DEFAULT_BLOCK_RULES = [
     {"url": r"rum\.cdn\.mkt\.go"},
     {"url": r"akstat\.io"},
     {"url": r"akamaized\.net/.*rum"},
+    {"url": r"go-mpulse\.net"},
     # Consent / cookie managers
-    {"url": r"onetrust\.com"},
-    {"url": r"cookielaw\.org"},
+    # NOTE: Do NOT block onetrust.com / cookielaw.org — their SDK defines
+    # global functions (e.g. document._l) that many sites call at init.
+    # Blocking them removes the script from the WACZ, causing "not a function"
+    # crashes during replay.  The behavior script dismisses cookie banners instead.
     {"url": r"osano\.com"},
     {"url": r"trustarc\.com"},
     {"url": r"quantcast\.com"},
@@ -61,6 +66,16 @@ DEFAULT_BLOCK_RULES = [
     {"url": r"datadome\.co"},
     {"url": r"kasada\.io"},
     {"url": r"perimeterx\.net"},
+    # E-commerce cart/checkout — page JS may call cart endpoints during capture
+    # (e.g. SFCC Cart-AddProduct, minicart).  If these responses end up in the
+    # WACZ, replay JS re-triggers them and shows cart popups over the page.
+    {"url": r"Cart-AddProduct"},
+    {"url": r"Cart-Show"},
+    {"url": r"Cart-MiniCart"},
+    {"url": r"cart\?isMiniCart"},
+    {"url": r"/cart/add"},
+    {"url": r"/cart\.js"},
+    {"url": r"/api/cart"},
 ]
 
 
@@ -135,7 +150,11 @@ class BrowsertrixService:
         config = {
             "seeds": [{"url": url, "depth": 0, "scopeType": "page"}],
             "blockRules": DEFAULT_BLOCK_RULES,
-            "blockAds": True,
+            # blockAds uses EasyList/EasyPrivacy which blocks consent managers
+            # (cookielaw.org, onetrust.com) that define critical globals like
+            # document._l — causing page init crashes during replay.
+            # Our custom blockRules are sufficient.
+            "blockAds": False,
             # Let Chrome use its real UA — hardcoding creates a mismatch
             # between declared UA and actual TLS/browser fingerprint,
             # which WAFs like Akamai Bot Manager detect.
@@ -277,7 +296,11 @@ class BrowsertrixService:
         warmup_config = {
             "seeds": [{"url": origin, "depth": 0, "scopeType": "page"}],
             "blockRules": DEFAULT_BLOCK_RULES,
-            "blockAds": True,
+            # blockAds uses EasyList/EasyPrivacy which blocks consent managers
+            # (cookielaw.org, onetrust.com) that define critical globals like
+            # document._l — causing page init crashes during replay.
+            # Our custom blockRules are sufficient.
+            "blockAds": False,
             # Run only the custom behavior (human simulation) — skip heavy
             # built-in behaviors to keep the warm-up fast.
             "behaviors": [],
@@ -330,6 +353,9 @@ class BrowsertrixService:
             # Verify profile was saved
             profile_local = local_dir / "profile.tar.gz"
             if profile_local.exists() and profile_local.stat().st_size > 100:
+                # Strip non-WAF cookies to avoid session pollution
+                # (e.g. cart state from homepage causing dialogs on product pages)
+                self._filter_profile_cookies(profile_local)
                 logger.info(
                     "Warm-up OK: profile saved (%.1f KB)",
                     profile_local.stat().st_size / 1024,
@@ -346,25 +372,167 @@ class BrowsertrixService:
             logger.warning("Warm-up error: %s, continuing without profile", e)
             return None
 
+    # Cookie name patterns to KEEP from the warmup profile.
+    # These are WAF / bot-detection cookies that must survive for the
+    # main capture to pass anti-bot checks.  Everything else (session,
+    # cart, preferences, consent) is deleted to avoid polluting the
+    # main capture with unwanted server-side state.
+    WAF_COOKIE_PATTERNS = [
+        # Akamai Bot Manager
+        "_abck", "bm_sz", "ak_bmsc", "bm_mi", "bm_sv",
+        # Cloudflare
+        "cf_clearance", "__cf_bm", "cf_chl_",
+        # PerimeterX / Human Security
+        "_px", "_pxhd", "_pxvid", "_pxde",
+        # DataDome
+        "datadome",
+        # Kasada
+        "x-]]cd",
+        # Incapsula / Imperva
+        "incap_ses_", "visid_incap_", "nlbi_",
+        # AWS WAF
+        "aws-waf-token",
+        # Generic bot-management
+        "bm_", "bot_",
+    ]
+
+    @staticmethod
+    def _filter_profile_cookies(profile_path: Path) -> None:
+        """Remove non-WAF cookies from the warmup browser profile.
+
+        The warmup crawl visits the domain root to obtain WAF validation
+        cookies (e.g. Akamai _abck).  But it also picks up session, cart,
+        and preference cookies that can pollute the main capture — for
+        example, causing "you already have items in your cart" dialogs
+        on e-commerce sites.
+
+        We open the Chromium Cookies SQLite database inside the profile
+        tar.gz and delete all cookies except known WAF patterns.
+        """
+        try:
+            with TemporaryDirectory() as tmpdir:
+                tmpdir_path = Path(tmpdir)
+
+                # Extract profile
+                with tarfile.open(profile_path, "r:gz") as tar:
+                    tar.extractall(tmpdir_path)
+
+                # Find Cookies database (Chromium stores it at Default/Cookies
+                # or sometimes just Cookies at the profile root)
+                cookies_db = None
+                for candidate in [
+                    tmpdir_path / "Default" / "Cookies",
+                    tmpdir_path / "Cookies",
+                    # Browsertrix might nest under a profile subdir
+                    *tmpdir_path.rglob("Cookies"),
+                ]:
+                    if candidate.is_file():
+                        cookies_db = candidate
+                        break
+
+                if not cookies_db:
+                    logger.debug("No Cookies database found in profile, skipping filter")
+                    return
+
+                # Delete session-carrying storage (localStorage, IndexedDB,
+                # Cache, Service Workers) — these can hold cart state that
+                # cookies alone don't cover.
+                for storage_dir in [
+                    "Local Storage", "Session Storage", "IndexedDB",
+                    "Cache", "Code Cache", "Service Worker",
+                    "File System", "GPUCache",
+                ]:
+                    for match in tmpdir_path.rglob(storage_dir):
+                        if match.is_dir():
+                            shutil.rmtree(match, ignore_errors=True)
+                            logger.info("Cleaned profile storage: %s", match.name)
+
+                # Open SQLite and delete non-WAF cookies
+                conn = sqlite3.connect(str(cookies_db))
+                try:
+                    cursor = conn.cursor()
+
+                    # Log all cookies for debugging
+                    cursor.execute("SELECT name FROM cookies ORDER BY name")
+                    all_names = [r[0] for r in cursor.fetchall()]
+                    logger.info("Profile cookies before filter: %s", all_names)
+
+                    # Build WHERE clause: keep cookies whose name starts with
+                    # any of the WAF patterns.  Use ESCAPE to handle literal
+                    # underscores (LIKE treats _ as single-char wildcard).
+                    keep_conditions = " OR ".join(
+                        f"name LIKE '{p.replace('_', '~_')}%' ESCAPE '~'"
+                        for p in BrowsertrixService.WAF_COOKIE_PATTERNS
+                    )
+                    delete_sql = f"DELETE FROM cookies WHERE NOT ({keep_conditions})"
+
+                    total = len(all_names)
+                    cursor.execute(delete_sql)
+                    deleted = cursor.rowcount
+
+                    # Log kept cookies
+                    cursor.execute("SELECT name FROM cookies ORDER BY name")
+                    kept_names = [r[0] for r in cursor.fetchall()]
+                    logger.info("Profile cookies after filter: %s", kept_names)
+
+                    conn.commit()
+                    logger.info(
+                        "Profile cookie filter: kept %d/%d cookies (deleted %d non-WAF)",
+                        total - deleted, total, deleted,
+                    )
+                finally:
+                    conn.close()
+
+                # Repack profile tar.gz
+                with tarfile.open(profile_path, "w:gz") as tar:
+                    for item in tmpdir_path.iterdir():
+                        tar.add(str(item), arcname=item.name)
+
+        except Exception as e:
+            logger.warning("Failed to filter profile cookies (non-fatal): %s", e)
+
+    # URL patterns to strip from the WACZ index during post-processing.
+    # These are e-commerce cart/checkout endpoints whose responses, if kept
+    # in the WACZ, cause replay JS to show cart popups over the page.
+    WACZ_STRIP_URL_PATTERNS = [
+        r"Cart-AddProduct",
+        r"Cart-Show",
+        r"Cart-MiniCart",
+        r"cart\?isMiniCart",
+        r"/cart/add",
+        r"/cart\.js",
+        r"/api/cart",
+        r"itemAddedToCartPopin",
+    ]
+
     @staticmethod
     def _rebuild_wacz_index(wacz_path: Path) -> None:
         """Clean and rebuild the WACZ CDXJ index.
 
-        Two fixes applied:
+        Fixes applied:
         1. Remove 403 responses (CDN bot-detection artifacts like Akamai).
-        2. Rebuild index.cdx.gz as multi-member gzip with a correct index.idx.
+        2. Remove cart/checkout responses that cause popups during replay.
+        3. Rebuild index.cdx.gz as multi-member gzip with a correct index.idx.
            Browsertrix-crawler sometimes emits a single-member gzip, which
            makes ReplayWeb.page unable to find entries beyond the first block.
         """
+        import re as _re
+
         BLOCK_SIZE = 100  # CDXJ lines per gzip member
+
+        # Compile strip patterns once
+        strip_re = _re.compile(
+            "|".join(BrowsertrixService.WACZ_STRIP_URL_PATTERNS)
+        )
 
         try:
             with zipfile.ZipFile(wacz_path, "r") as zin:
                 cdx_data = gzip.decompress(zin.read("indexes/index.cdx.gz")).decode()
 
-            # --- Step 1: filter out 403 entries ---
+            # --- Step 1: filter out unwanted entries ---
             filtered = []
-            removed = 0
+            removed_403 = 0
+            removed_cart = 0
             for line in cdx_data.splitlines():
                 if not line.strip():
                     continue
@@ -373,14 +541,20 @@ class BrowsertrixService:
                     try:
                         meta = json.loads(parts[2])
                         if meta.get("status") == "403":
-                            removed += 1
+                            removed_403 += 1
+                            continue
+                        url = meta.get("url", "")
+                        if url and strip_re.search(url):
+                            removed_cart += 1
                             continue
                     except (json.JSONDecodeError, KeyError):
                         pass
                 filtered.append(line)
 
-            if removed:
-                logger.info("Cleaned WACZ index: removed %d x 403 entries", removed)
+            if removed_403:
+                logger.info("Cleaned WACZ index: removed %d x 403 entries", removed_403)
+            if removed_cart:
+                logger.info("Cleaned WACZ index: removed %d cart/checkout entries", removed_cart)
 
             # --- Step 2: rebuild as multi-member gzip + index.idx ---
             # Split CDXJ lines into blocks, compress each as a separate

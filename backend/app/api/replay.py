@@ -82,12 +82,17 @@ _REPLAY_PATCH = r"""<script>
   var vs=document.createElement('style');
   vs.textContent=[
     'html,body,#app,#root,#__next,[data-app],main,.app-wrapper,.page-wrapper,',
-    '.lv-page,.lv-app,[data-component]{',
+    '.lv-page,.lv-app,[data-component]:not([role="dialog"]):not([role="alertdialog"]){',
     'opacity:1!important;visibility:visible!important;overflow:visible!important}',
     'img,picture,video,source{opacity:1!important;visibility:visible!important}',
     /* Kill transitions/animations that keep content hidden during "loading" */
     '[class*="loading"],[class*="preload"],[class*="initializing"]{',
-    'opacity:1!important;visibility:visible!important;pointer-events:auto!important}'
+    'opacity:1!important;visibility:visible!important;pointer-events:auto!important}',
+    /* Hide dialogs/modals/backdrops — these are interactive overlays that */
+    /* don't work in archive replay and block the actual page content.     */
+    '[role="dialog"],[role="alertdialog"],[aria-modal="true"]{',
+    'display:none!important}',
+    '[class*="backdrop"]{display:none!important}'
   ].join('');
   (document.head||document.documentElement).appendChild(vs);
 

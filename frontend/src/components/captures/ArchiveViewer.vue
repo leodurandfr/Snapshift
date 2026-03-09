@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ref, computed, watch } from 'vue'
-import { X, Maximize2, Minimize2 } from 'lucide-vue-next'
+import { X, Maximize2, Minimize2, Smartphone } from 'lucide-vue-next'
 import { useCapturesStore } from '@/stores/captures'
 
 const props = defineProps<{
@@ -13,6 +13,7 @@ const emit = defineEmits<{ 'update:open': [value: boolean] }>()
 
 const capturesStore = useCapturesStore()
 const isFullscreen = ref(false)
+const isMobile = ref(false)
 const iframeLoaded = ref(false)
 
 const previewUrl = computed(() =>
@@ -22,6 +23,7 @@ const previewUrl = computed(() =>
 watch(() => props.open, (val) => {
   if (!val) {
     isFullscreen.value = false
+    isMobile.value = false
     iframeLoaded.value = false
   }
 })
@@ -47,7 +49,8 @@ function onBackdropClick(e: MouseEvent) {
           'bg-background flex flex-col shadow-2xl overflow-hidden transition-all duration-200',
           isFullscreen
             ? 'fixed inset-0'
-            : 'relative rounded-lg w-[85vw] h-[85vh]',
+            : 'relative rounded-lg h-[85vh]',
+          !isFullscreen && isMobile ? 'w-[390px]' : !isFullscreen ? 'w-[85vw]' : '',
         ]"
       >
         <!-- Control bar -->
@@ -57,9 +60,17 @@ function onBackdropClick(e: MouseEvent) {
           </span>
           <div class="flex items-center gap-1">
             <button
+              class="p-1.5 rounded transition-colors"
+              :class="isMobile ? 'bg-primary text-primary-foreground' : 'hover:bg-muted'"
+              title="Mobile view (390px)"
+              @click="isMobile = !isMobile; if (isMobile) isFullscreen = false"
+            >
+              <Smartphone class="w-4 h-4" />
+            </button>
+            <button
               class="p-1.5 rounded hover:bg-muted transition-colors"
               :title="isFullscreen ? 'Exit fullscreen' : 'Fullscreen'"
-              @click="isFullscreen = !isFullscreen"
+              @click="isFullscreen = !isFullscreen; if (isFullscreen) isMobile = false"
             >
               <Minimize2 v-if="isFullscreen" class="w-4 h-4" />
               <Maximize2 v-else class="w-4 h-4" />
