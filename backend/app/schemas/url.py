@@ -1,5 +1,6 @@
 import uuid
 from datetime import datetime
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -10,6 +11,20 @@ def _normalize_url(v: str) -> str:
     v = v.strip()
     if v and not v.startswith(("http://", "https://")):
         v = f"https://{v}"
+    return v
+
+
+def _validate_url(v: str) -> str:
+    """Validate that the URL has a resolvable-looking hostname (with a TLD)."""
+    parsed = urlparse(v)
+    if not parsed.scheme or parsed.scheme not in ("http", "https"):
+        raise ValueError("URL must start with http:// or https://")
+    hostname = parsed.hostname
+    if not hostname or "." not in hostname:
+        raise ValueError(
+            f"Invalid hostname '{hostname}': must include a domain extension "
+            f"(e.g. '{hostname}.com')"
+        )
     return v
 
 
@@ -32,7 +47,8 @@ class URLCreate(BaseModel):
     @field_validator("url", mode="before")
     @classmethod
     def normalize_url(cls, v: str) -> str:
-        return _normalize_url(v)
+        return _validate_url(_normalize_url(v))
+
     viewports: list[ViewportConfig] = Field(default_factory=lambda: DEFAULT_VIEWPORTS.copy())
     schedule: str = Field(default="daily", pattern=r"^(every_\d+h|daily|weekly|monthly)$")
     full_page: bool = True
@@ -51,7 +67,7 @@ class URLUpdate(BaseModel):
     def normalize_url(cls, v: str | None) -> str | None:
         if v is None:
             return v
-        return _normalize_url(v)
+        return _validate_url(_normalize_url(v))
     viewports: list[ViewportConfig] | None = None
     schedule: str | None = Field(default=None, pattern=r"^(every_\d+h|daily|weekly|monthly)$")
     full_page: bool | None = None
